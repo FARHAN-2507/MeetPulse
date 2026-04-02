@@ -1,0 +1,10 @@
+.scroll-bar .thumb {
+    -fx-background-color: #2a3550;
+    -fx-background-radius: 4;
+}
+.scroll-bar .track {
+    -fx-background-color: transparent;
+}
+.text-area .content {
+    -fx-background-color: #0d1118;
+}

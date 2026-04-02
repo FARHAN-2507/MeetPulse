@@ -5,80 +5,115 @@ import com.meetpulse.model.MeetingStats;
 import com.meetpulse.model.SpeakingSegment;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 public class MeetingAnalyzer {
 
-    private final List<EnergyFrame>     frames   = new ArrayList<>();
-    private final List<SpeakingSegment> segments = new ArrayList<>();
-    private final long startTime = System.currentTimeMillis();
+    private final List<EnergyFrame>      frames   = new ArrayList<>();
+    private final List<SpeakingSegment>  segments = new ArrayList<>();
+    private       SpeakingSegment        current  = null;
+    private       long                   startTime;
+    private       double                 peakRms  = 0;
 
-    private SpeakingSegment currentSegment = null;
+    public MeetingAnalyzer() { startTime = System.currentTimeMillis(); }
 
-    public void addFrame(EnergyFrame frame) {
+    // ── reset for new session ─────────────────────────────────────────────
+    public synchronized void reset() {
+        frames.clear();
+        segments.clear();
+        current   = null;
+        peakRms   = 0;
+        startTime = System.currentTimeMillis();
+    }
+
+    // ── add frame ─────────────────────────────────────────────────────────
+    public synchronized void addFrame(EnergyFrame frame) {
         frames.add(frame);
-        long relativeMs = frame.getTimestamp() - startTime;
+        if (frame.getRms() > peakRms) peakRms = frame.getRms();
+
+        long relMs = frame.getTimestamp() - startTime;
 
         if (!frame.isSilent()) {
-            if (currentSegment == null) {
-                currentSegment = new SpeakingSegment(relativeMs);
+            if (current == null) {
+                current = new SpeakingSegment(relMs);
             } else {
-                currentSegment.close(relativeMs);
+                current.extend(relMs);
             }
         } else {
-            if (currentSegment != null) {
-                currentSegment.close(relativeMs);
-                if (currentSegment.getDurationMs() >= 200) {
-                    segments.add(currentSegment);
+            if (current != null) {
+                current.close(relMs);
+                if (current.getDurationMs() >= 200) {
+                    segments.add(current);
                 }
-                currentSegment = null;
+                current = null;
             }
         }
     }
 
-    // Bucket frames into 1-second RMS averages for timeline
-    public List<Double> getRmsBySecond() {
-        List<Double> result = new ArrayList<>();
-        if (frames.isEmpty()) return result;
-
-        long bucketStart = frames.get(0).getTimestamp();
-        double bucketSum = 0;
-        int    bucketCount = 0;
-
-        for (EnergyFrame f : frames) {
-            if (f.getTimestamp() - bucketStart >= 1000) {
-                result.add(bucketCount > 0 ? bucketSum / bucketCount : 0);
-                bucketSum   = 0;
-                bucketCount = 0;
-                bucketStart = f.getTimestamp();
-            }
-            bucketSum += f.getRms();
-            bucketCount++;
-        }
-        if (bucketCount > 0) result.add(bucketSum / bucketCount);
-        return result;
+    // ── live stats (NON-mutating, safe to call anytime) ───────────────────
+    public synchronized double getLiveSpeakingPct() {
+        int total = frames.size();
+        if (total == 0) return 0;
+        long silent = frames.stream().filter(EnergyFrame::isSilent).count();
+        return (1.0 - (double) silent / total) * 100.0;
     }
 
-    public List<SpeakingSegment> getSegments() { return segments; }
+    public synchronized int getLiveSegmentCount() {
+        return segments.size() + (current != null ? 1 : 0);
+    }
 
-    public MeetingStats summarize() {
-        if (currentSegment != null) {
-            currentSegment.close(System.currentTimeMillis() - startTime);
-            if (currentSegment.getDurationMs() >= 200) segments.add(currentSegment);
-            currentSegment = null;
+    public synchronized double getLivePeakRms() { return peakRms; }
+
+    public synchronized int getLiveFrameCount() { return frames.size(); }
+
+    // ── final summary (called after stop) ────────────────────────────────
+    public synchronized MeetingStats summarize() {
+        // Close any open segment at the time of summarizing
+        List<SpeakingSegment> allSegs = new ArrayList<>(segments);
+        if (current != null) {
+            SpeakingSegment closing = new SpeakingSegment(current.getStartMs());
+            closing.extend(current.getEndMs());
+            closing.close(current.getEndMs());
+            if (closing.getDurationMs() >= 200) allSegs.add(closing);
         }
 
-        int total = frames.size(), silent = 0;
-        double sumRms = 0, peak = 0;
+        int total   = frames.size();
+        int silent  = 0;
+        double sumRms = 0;
 
         for (EnergyFrame f : frames) {
             if (f.isSilent()) silent++;
             sumRms += f.getRms();
-            if (f.getRms() > peak) peak = f.getRms();
         }
 
-        long durationMs = System.currentTimeMillis() - startTime;
-        double avg = total > 0 ? sumRms / total : 0;
-        return new MeetingStats(total, silent, avg, peak, durationMs, segments);
+        long   durationMs = System.currentTimeMillis() - startTime;
+        double avg        = total > 0 ? sumRms / total : 0;
+
+        return new MeetingStats(total, silent, avg, peakRms, durationMs,
+                Collections.unmodifiableList(allSegs));
+    }
+
+    // ── per-second RMS for charts ─────────────────────────────────────────
+    public synchronized List<Double> getRmsBySecond() {
+        List<Double> result = new ArrayList<>();
+        if (frames.isEmpty()) return result;
+
+        long bucketStart = frames.get(0).getTimestamp();
+        double sumBucket = 0;
+        int    cntBucket = 0;
+
+        for (EnergyFrame f : frames) {
+            if (f.getTimestamp() - bucketStart >= 1000) {
+                result.add(cntBucket > 0 ? sumBucket / cntBucket : 0);
+                sumBucket  = 0;
+                cntBucket  = 0;
+                bucketStart = f.getTimestamp();
+            }
+            sumBucket += f.getRms();
+            cntBucket++;
+        }
+        if (cntBucket > 0) result.add(sumBucket / cntBucket);
+        return result;
     }
 }
