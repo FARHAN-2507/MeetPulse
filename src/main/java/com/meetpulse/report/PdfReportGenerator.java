@@ -13,6 +13,9 @@ import org.jfree.chart.axis.*;
 import org.jfree.chart.plot.*;
 import org.jfree.chart.renderer.xy.XYAreaRenderer;
 import org.jfree.chart.renderer.xy.XYBarRenderer;
+import org.jfree.chart.renderer.xy.XYLineAndShapeRenderer;
+import org.jfree.chart.renderer.category.BarRenderer;
+import org.jfree.data.category.DefaultCategoryDataset;
 import org.jfree.data.statistics.HistogramDataset;
 import org.jfree.data.xy.*;
 
@@ -24,6 +27,8 @@ import java.awt.image.BufferedImage;
 import java.io.*;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 
 public class PdfReportGenerator {
@@ -142,6 +147,26 @@ public class PdfReportGenerator {
         capRow.addCell(captionCell("RMS value distribution with threshold marker"));
         doc.add(capRow);
 
+        // ── Engagement profile ───────────────────────────────────────────
+        sectionHeader(doc, writer, "Engagement Profile",
+                "How energy evolved from opening to close, and whether momentum sustained");
+
+        PdfPTable profile = new PdfPTable(2);
+        profile.setWidthPercentage(100);
+        profile.setWidths(new float[]{1f, 1f});
+        profile.setSpacingAfter(12);
+        profile.addCell(imgCell(makeImage(chartPhaseEnergy(timeline, thresh), 250, 180)));
+        profile.addCell(imgCell(makeImage(chartMomentum(timeline, thresh), 250, 180)));
+        doc.add(profile);
+
+        PdfPTable profileCap = new PdfPTable(2);
+        profileCap.setWidthPercentage(100);
+        profileCap.setWidths(new float[]{1f, 1f});
+        profileCap.setSpacingAfter(20);
+        profileCap.addCell(captionCell("Phase Energy — opening, middle, closing averages"));
+        profileCap.addCell(captionCell("Momentum Trend — raw energy vs rolling baseline"));
+        doc.add(profileCap);
+
         // ── Segments ──────────────────────────────────────────────────────
         sectionHeader(doc, writer, "Speaking Segments",
                 "Individual speaking bursts detected during the session");
@@ -155,10 +180,9 @@ public class PdfReportGenerator {
                     Math.min(200, 40 + segs.size() * 24)));
             doc.add(chartCaption("Each bar represents one speaking burst on the session timeline"));
             space(doc, 14);
-
-            // Segments table
-            buildSegmentsTable(doc, segs, stats.getDurationMs());
+            buildSpeakingDynamics(doc, segs, stats.getDurationMs());
         }
+        buildTimelineMoments(doc, timeline, thresh);
 
         // ── Technical Details ─────────────────────────────────────────────
         doc.newPage();
@@ -170,6 +194,8 @@ public class PdfReportGenerator {
 
         // ── Insights box ──────────────────────────────────────────────────
         buildInsightsBox(doc, writer, stats, segs);
+        space(doc, 12);
+        buildExecutiveActionPlan(doc, stats, timeline, thresh);
 
         doc.close();
     }
@@ -180,111 +206,177 @@ public class PdfReportGenerator {
     private void buildCoverPage(Document doc, PdfWriter writer,
                                 String ts, MeetingStats stats) throws Exception {
         PdfContentByte cb = writer.getDirectContent();
+        double score = sessionScore(stats);
+        String tier = sessionTier(score);
+        BaseColor scoreColor = score >= 80 ? C_TEAL : (score >= 60 ? C_AMBER : C_RED);
+        BaseFont bfBold = BaseFont.createFont(BaseFont.HELVETICA_BOLD, BaseFont.CP1252, false);
+        BaseFont bf = BaseFont.createFont(BaseFont.HELVETICA, BaseFont.CP1252, false);
 
-        // Dark gradient background for cover
-        cb.setColorFill(C_COVER_TOP);
+        // Light background
+        cb.setColorFill(new BaseColor(245, 249, 255));
         cb.rectangle(0, 0, PW, PH);
         cb.fill();
 
-        // Accent diagonal strip
-        cb.setColorFill(new BaseColor(30, 58, 138));
-        cb.moveTo(0, PH * 0.38f);
+        cb.setColorFill(new BaseColor(226, 238, 255));
+        cb.moveTo(0, PH * 0.52f);
         cb.lineTo(PW, PH * 0.48f);
         cb.lineTo(PW, 0);
         cb.lineTo(0, 0);
         cb.fill();
 
-        // Decorative circles
-        cb.setColorStroke(new BaseColor(255, 255, 255, 18));
-        cb.setLineWidth(1f);
-        cb.circle(PW - 60, PH - 60, 180);
-        cb.stroke();
-        cb.circle(PW - 60, PH - 60, 120);
-        cb.stroke();
-        cb.circle(PW - 60, PH - 60, 60);
-        cb.stroke();
-
-        // Thin accent line
-        cb.setColorFill(new BaseColor(59, 130, 246));
-        cb.rectangle(ML, PH * 0.58f, 48, 4);
+        // Ambient glow circles
+        cb.setColorFill(new BaseColor(79, 142, 247, 36));
+        cb.circle(PW - 90, PH - 120, 150);
+        cb.fill();
+        cb.setColorFill(new BaseColor(29, 214, 160, 24));
+        cb.circle(110, 120, 120);
         cb.fill();
 
-        // App name small label
-        cb.setColorFill(new BaseColor(100, 149, 237));
-        cb.setFontAndSize(BaseFont.createFont(BaseFont.HELVETICA, BaseFont.CP1252, false), 10);
-        cb.beginText();
-        cb.showTextAligned(Element.ALIGN_LEFT, "MEETPULSE  •  AUDIO INTELLIGENCE", ML, PH * 0.62f, 0);
-        cb.endText();
+        // Main hero card
+        float cardX = ML;
+        float cardY = 122f;
+        float cardW = CW;
+        float cardH = PH - 220f;
+        cb.setColorFill(new BaseColor(255, 255, 255, 245));
+        cb.roundRectangle(cardX, cardY, cardW, cardH, 18);
+        cb.fill();
+        cb.setColorStroke(new BaseColor(186, 202, 226));
+        cb.setLineWidth(0.9f);
+        cb.roundRectangle(cardX, cardY, cardW, cardH, 18);
+        cb.stroke();
 
-        // Main title
-        cb.setColorFill(C_WHITE);
-        cb.setFontAndSize(BaseFont.createFont(BaseFont.HELVETICA_BOLD, BaseFont.CP1252, false), 40);
-        cb.beginText();
-        cb.showTextAligned(Element.ALIGN_LEFT, "Meeting", ML, PH * 0.54f, 0);
-        cb.endText();
-
-        cb.setFontAndSize(BaseFont.createFont(BaseFont.HELVETICA_BOLD, BaseFont.CP1252, false), 40);
-        cb.beginText();
-        cb.showTextAligned(Element.ALIGN_LEFT, "Analysis Report", ML, PH * 0.47f, 0);
-        cb.endText();
-
-        // Subtitle
-        cb.setColorFill(new BaseColor(148, 163, 184));
-        cb.setFontAndSize(BaseFont.createFont(BaseFont.HELVETICA, BaseFont.CP1252, false), 12);
-        cb.beginText();
-        cb.showTextAligned(Element.ALIGN_LEFT, ts, ML, PH * 0.41f, 0);
-        cb.endText();
-
-        // Stats strip at bottom of cover
-        float stripY = 80f;
-        float stripH = 90f;
-        cb.setColorFill(new BaseColor(15, 23, 60));
-        cb.roundRectangle(ML, stripY, CW, stripH, 10);
+        // Header line
+        cb.setColorFill(new BaseColor(96, 165, 250));
+        cb.rectangle(cardX + 18, cardY + cardH - 34, 54, 3);
         cb.fill();
 
-        // stat items
+        // Brand + report title
+        cb.setColorFill(new BaseColor(67, 98, 145));
+        cb.setFontAndSize(bf, 10);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_LEFT, "MEETPULSE • PRIVATE AUDIO INTELLIGENCE", cardX + 18, cardY + cardH - 24, 0);
+        cb.endText();
+
+        cb.setColorFill(C_INK);
+        cb.setFontAndSize(bfBold, 34);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_LEFT, "Meeting Report", cardX + 18, cardY + cardH - 68, 0);
+        cb.endText();
+
+        cb.setColorFill(new BaseColor(84, 102, 128));
+        cb.setFontAndSize(bf, 11);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_LEFT, ts, cardX + 18, cardY + cardH - 88, 0);
+        cb.endText();
+
+        // Tier badge
+        float badgeW = 78f;
+        float badgeH = 20f;
+        float badgeX = cardX + cardW - badgeW - 22f;
+        float badgeY = cardY + cardH - 34f;
+        cb.setColorFill(new BaseColor(226, 236, 248));
+        cb.roundRectangle(badgeX, badgeY, badgeW, badgeH, 10);
+        cb.fill();
+        cb.setColorFill(C_INK);
+        cb.setFontAndSize(bfBold, 9);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_CENTER, tier.toUpperCase(), badgeX + badgeW / 2, badgeY + 7, 0);
+        cb.endText();
+
+        // Right score gauge
+        float gaugeCx = cardX + cardW - 118f;
+        float gaugeCy = cardY + cardH - 138f;
+        float r = 58f;
+        cb.setColorStroke(new BaseColor(210, 220, 236));
+        cb.setLineWidth(8f);
+        cb.arc(gaugeCx - r, gaugeCy - r, gaugeCx + r, gaugeCy + r, 150, 240);
+        cb.stroke();
+
+        cb.setColorStroke(scoreColor);
+        cb.setLineWidth(8f);
+        cb.arc(gaugeCx - r, gaugeCy - r, gaugeCx + r, gaugeCy + r, 150, (float) (240.0 * (score / 100.0)));
+        cb.stroke();
+
+        cb.setColorFill(C_INK);
+        cb.setFontAndSize(bfBold, 28);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_CENTER, String.format("%.0f", score), gaugeCx, gaugeCy - 10, 0);
+        cb.endText();
+        cb.setColorFill(new BaseColor(95, 112, 139));
+        cb.setFontAndSize(bf, 9);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_CENTER, "SESSION SCORE", gaugeCx, gaugeCy - 24, 0);
+        cb.endText();
+
+        // Privacy promise
+        cb.setColorFill(new BaseColor(84, 102, 128));
+        cb.setFontAndSize(bf, 9);
+        cb.beginText();
+        cb.showTextAligned(Element.ALIGN_LEFT, "No transcript stored • Signal-level analytics only", cardX + 18, cardY + cardH - 120, 0);
+        cb.endText();
+
+        // Metric tiles
+        float tilesY = cardY + 20f;
+        float tileH = 76f;
+        float gap = 10f;
+        float tileW = (cardW - (gap * 5)) / 4;
         String[][] coverStats = {
                 { String.format("%.0fs", stats.getDurationMs() / 1000.0), "DURATION" },
                 { String.format("%.1f%%", (1 - stats.getSilenceRatio()) * 100), "SPEAKING" },
                 { String.valueOf(stats.getSegments().size()), "SEGMENTS" },
                 { String.format("%.0f", stats.getPeakRms()), "PEAK RMS" },
         };
-
-        float colW = CW / coverStats.length;
-        BaseFont bfBold   = BaseFont.createFont(BaseFont.HELVETICA_BOLD, BaseFont.CP1252, false);
-        BaseFont bfNormal = BaseFont.createFont(BaseFont.HELVETICA, BaseFont.CP1252, false);
-
         for (int i = 0; i < coverStats.length; i++) {
-            float cx = ML + colW * i + colW / 2;
+            float x = cardX + gap + i * (tileW + gap);
+            cb.setColorFill(new BaseColor(248, 252, 255));
+            cb.roundRectangle(x, tilesY, tileW, tileH, 9);
+            cb.fill();
+            cb.setColorStroke(new BaseColor(200, 213, 234));
+            cb.setLineWidth(0.6f);
+            cb.roundRectangle(x, tilesY, tileW, tileH, 9);
+            cb.stroke();
 
-            // vertical divider
-            if (i > 0) {
-                cb.setColorStroke(new BaseColor(255, 255, 255, 30));
-                cb.setLineWidth(0.5f);
-                cb.moveTo(ML + colW * i, stripY + 16);
-                cb.lineTo(ML + colW * i, stripY + stripH - 16);
-                cb.stroke();
-            }
-
-            cb.setColorFill(C_WHITE);
+            cb.setColorFill(C_INK);
             cb.setFontAndSize(bfBold, 22);
             cb.beginText();
-            cb.showTextAligned(Element.ALIGN_CENTER, coverStats[i][0], cx, stripY + 44, 0);
+            cb.showTextAligned(Element.ALIGN_CENTER, coverStats[i][0], x + tileW / 2, tilesY + 42, 0);
             cb.endText();
 
-            cb.setColorFill(new BaseColor(100, 116, 139));
-            cb.setFontAndSize(bfNormal, 8);
+            cb.setColorFill(new BaseColor(95, 112, 139));
+            cb.setFontAndSize(bf, 8);
             cb.beginText();
-            cb.showTextAligned(Element.ALIGN_CENTER, coverStats[i][1], cx, stripY + 22, 0);
+            cb.showTextAligned(Element.ALIGN_CENTER, coverStats[i][1], x + tileW / 2, tilesY + 18, 0);
             cb.endText();
         }
-
-        // MeetPulse watermark top right
-        cb.setColorFill(new BaseColor(255, 255, 255, 25));
-        cb.setFontAndSize(bfBold, 11);
+        cb.setColorFill(new BaseColor(91, 108, 133));
+        cb.setFontAndSize(bfBold, 10);
         cb.beginText();
-        cb.showTextAligned(Element.ALIGN_RIGHT, "MeetPulse", PW - MR, PH - 30, 0);
+        cb.showTextAligned(Element.ALIGN_RIGHT, "MeetPulse", PW - MR, PH - 26, 0);
         cb.endText();
+    }
+
+    private double sessionScore(MeetingStats s) {
+        double speakingPct = (1.0 - s.getSilenceRatio()) * 100.0;
+        double speakScore = clampScore(100.0 - Math.abs(55.0 - speakingPct) * 1.8);
+        double durationMin = s.getDurationMs() / 60000.0;
+        double segRate = durationMin > 0 ? s.getSegments().size() / durationMin : 0;
+        double cadenceScore = clampScore(segRate * 18.0);
+        double avgSeg = s.getSegments().isEmpty() ? 0.0
+                : s.getSegments().stream().mapToLong(SpeakingSegment::getDurationMs).average().orElse(0) / 1000.0;
+        double segScore = clampScore(100.0 - Math.abs(3.5 - avgSeg) * 16.0);
+        return (speakScore * 0.50) + (cadenceScore * 0.30) + (segScore * 0.20);
+    }
+
+    private String sessionTier(double score) {
+        if (score >= 80) return "Premium";
+        if (score >= 60) return "Strong";
+        return "Basic";
+    }
+
+    private double clampScore(double v) {
+        if (v < 0) return 0;
+        if (v > 100) return 100;
+        return v;
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -382,54 +474,92 @@ public class PdfReportGenerator {
     // ══════════════════════════════════════════════════════════════════════
     // SEGMENTS TABLE
     // ══════════════════════════════════════════════════════════════════════
-    private void buildSegmentsTable(Document doc, List<SpeakingSegment> segs,
-                                    long durationMs) throws Exception {
-        PdfPTable t = new PdfPTable(5);
-        t.setWidthPercentage(100);
-        t.setWidths(new float[]{0.6f, 1.5f, 1.5f, 1.5f, 2f});
-        t.setSpacingAfter(16);
-
-        // header
-        String[] headers = {"#", "Start", "End", "Duration", "Proportion"};
-        for (String h : headers) {
-            PdfPCell c = new PdfPCell(new Phrase(h, F_TBL_HDR));
-            c.setBackgroundColor(C_INK);
-            c.setPadding(8);
-            c.setPaddingLeft(10);
-            c.setBorder(Rectangle.NO_BORDER);
-            c.setHorizontalAlignment(Element.ALIGN_LEFT);
-            t.addCell(c);
-        }
-
-        double total = durationMs / 1000.0;
+    private void buildSpeakingDynamics(Document doc, List<SpeakingSegment> segs,
+                                       long durationMs) throws Exception {
+        double totalSec = durationMs / 1000.0;
         long totalSpeakMs = 0;
+        long longestMs = 0;
+        List<Double> lens = new ArrayList<>();
 
-        for (int i = 0; i < segs.size(); i++) {
-            SpeakingSegment sg  = segs.get(i);
-            BaseColor rowBg = i % 2 == 0 ? C_WHITE : C_PAGE_BG;
-            double pct = total > 0 ? (sg.getDurationMs() / 1000.0) / total * 100 : 0;
-            totalSpeakMs += sg.getDurationMs();
+        for (SpeakingSegment s : segs) {
+            long d = Math.max(0, s.getDurationMs());
+            totalSpeakMs += d;
+            longestMs = Math.max(longestMs, d);
+            lens.add(d / 1000.0);
+        }
+        lens.sort(Comparator.naturalOrder());
+        double medianSeg = lens.isEmpty() ? 0 : (lens.size() % 2 == 1
+                ? lens.get(lens.size() / 2)
+                : (lens.get((lens.size() / 2) - 1) + lens.get(lens.size() / 2)) / 2.0);
+        double segmentsPerMin = totalSec > 0 ? (segs.size() / (totalSec / 60.0)) : 0;
+        double talkCoverage = totalSec > 0 ? ((totalSpeakMs / 1000.0) / totalSec) * 100.0 : 0;
 
-            addRow(t, rowBg,
-                    String.valueOf(i + 1),
-                    String.format("%.2f s", sg.getStartMs() / 1000.0),
-                    String.format("%.2f s", sg.getEndMs()   / 1000.0),
-                    String.format("%.2f s", sg.getDurationMs() / 1000.0),
-                    String.format("%.1f%%", pct)
-            );
+        sectionHeader2(doc, "Speaking Dynamics");
+        PdfPTable k = new PdfPTable(4);
+        k.setWidthPercentage(100);
+        k.setSpacingAfter(14);
+        k.setWidths(new float[]{1f, 1f, 1f, 1f});
+        k.addCell(statPill(String.format("%.1f%%", talkCoverage), "Talk Coverage", C_TEAL, C_TEAL_LT));
+        k.addCell(statPill(String.format("%.1f/min", segmentsPerMin), "Segments Rate", C_ACCENT, C_ACCENT_LT));
+        k.addCell(statPill(String.format("%.1fs", medianSeg), "Median Segment", C_AMBER, C_AMBER_LT));
+        k.addCell(statPill(String.format("%.1fs", longestMs / 1000.0), "Longest Burst", C_RED, C_RED_LT));
+        doc.add(k);
+    }
+
+    private void buildTimelineMoments(Document doc, List<Double> timeline, double threshold) throws Exception {
+        sectionHeader2(doc, "Key Timeline Moments");
+        if (timeline == null || timeline.isEmpty()) {
+            doc.add(emptyNotice("No timeline data available."));
+            return;
         }
 
-        // totals row
-        PdfPCell[] totCells = {
-                tblCell("", C_LIGHT, F_TBL_FOOT),
-                tblCell("", C_LIGHT, F_TBL_FOOT),
-                tblCell("Total", C_LIGHT, F_TBL_FOOT),
-                tblCell(String.format("%.2f s", totalSpeakMs / 1000.0), C_LIGHT, new Font(Font.FontFamily.HELVETICA, 9, Font.BOLD, C_ACCENT)),
-                tblCell(String.format("%.1f%% of session", total > 0 ? (totalSpeakMs/1000.0)/total*100 : 0), C_LIGHT, new Font(Font.FontFamily.HELVETICA, 9, Font.BOLD, C_TEAL)),
-        };
-        for (PdfPCell c : totCells) t.addCell(c);
+        int peakSec = 0;
+        double peakVal = -1;
+        int quietStart = -1;
+        int quietBestStart = -1;
+        int quietBestLen = 0;
+        List<Integer> above = new ArrayList<>();
 
-        doc.add(t);
+        for (int i = 0; i < timeline.size(); i++) {
+            double v = timeline.get(i);
+            if (v > peakVal) { peakVal = v; peakSec = i; }
+            if (v >= threshold) above.add(i);
+
+            boolean silent = v < threshold;
+            if (silent && quietStart < 0) quietStart = i;
+            if (!silent && quietStart >= 0) {
+                int len = i - quietStart;
+                if (len > quietBestLen) { quietBestLen = len; quietBestStart = quietStart; }
+                quietStart = -1;
+            }
+        }
+        if (quietStart >= 0) {
+            int len = timeline.size() - quietStart;
+            if (len > quietBestLen) { quietBestLen = len; quietBestStart = quietStart; }
+        }
+
+        PdfPTable list = new PdfPTable(1);
+        list.setWidthPercentage(100);
+        list.setSpacingAfter(14);
+        list.addCell(momentCell("Peak energy",
+                String.format("Highest intensity at %ds (RMS %.0f).", peakSec, peakVal), C_RED));
+
+        if (!above.isEmpty()) {
+            int firstActive = above.get(0);
+            int lastActive = above.get(above.size() - 1);
+            list.addCell(momentCell("Active range",
+                    String.format("Sustained above-threshold activity from %ds to %ds.", firstActive, lastActive), C_TEAL));
+        } else {
+            list.addCell(momentCell("Activity warning",
+                    "No timeline points exceeded the calibrated threshold. Check mic level or calibration silence.", C_AMBER));
+        }
+
+        if (quietBestLen > 0) {
+            list.addCell(momentCell("Longest quiet window",
+                    String.format("%ds of low activity starting at %ds.", quietBestLen, quietBestStart), C_ACCENT));
+        }
+
+        doc.add(list);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -485,6 +615,8 @@ public class PdfReportGenerator {
         double speakPct  = (1 - stats.getSilenceRatio()) * 100;
         double avgSegSec = segs.isEmpty() ? 0
                 : segs.stream().mapToLong(SpeakingSegment::getDurationMs).average().orElse(0) / 1000.0;
+        long longestMs = segs.stream().mapToLong(SpeakingSegment::getDurationMs).max().orElse(0);
+        double density = stats.getDurationMs() > 0 ? (segs.size() / (stats.getDurationMs() / 60000.0)) : 0;
 
         // pick an insight based on the data
         String insight;
@@ -506,6 +638,16 @@ public class PdfReportGenerator {
                     "). This may indicate fragmented speech, background clicks, or a threshold that needs adjusting.";
             insightColor = C_RED;
             insightBg    = C_RED_LT;
+        } else if (longestMs > 15000) {
+            insight      = "A long monologue burst was detected (" + String.format("%.1fs", longestMs / 1000.0) +
+                    "). Consider introducing checkpoints to improve interaction quality.";
+            insightColor = C_AMBER;
+            insightBg    = C_AMBER_LT;
+        } else if (density > 12) {
+            insight      = "High exchange frequency (" + String.format("%.1f segments/min", density) +
+                    "). The conversation had fast turn-taking and strong cadence.";
+            insightColor = C_TEAL;
+            insightBg    = C_TEAL_LT;
         } else {
             insight      = "Good session profile — " + String.format("%.1f%%", speakPct) +
                     " speaking with " + segs.size() + " distinct segments averaging " +
@@ -535,6 +677,51 @@ public class PdfReportGenerator {
         cell.setPadding(14);
         card.addCell(cell);
         doc.add(card);
+    }
+
+    private void buildExecutiveActionPlan(Document doc, MeetingStats stats,
+                                          List<Double> timeline, double threshold) throws Exception {
+        sectionHeader2(doc, "Executive Action Plan");
+
+        String p1Title = "Priority 1 — Calibration Confidence";
+        String p1Body;
+        if (timeline.stream().noneMatch(v -> v >= threshold)) {
+            p1Body = "No timeline samples crossed threshold. Re-run calibration in silence, then check mic gain to avoid under-reporting speaking activity.";
+        } else {
+            p1Body = "Calibration appears functional. Keep first 3-4 seconds silent at each session start for stable baseline estimation.";
+        }
+
+        String p2Title = "Priority 2 — Participation Shape";
+        String p2Body;
+        double speakingPct = (1 - stats.getSilenceRatio()) * 100.0;
+        if (speakingPct < 20) {
+            p2Body = "Low participation detected. Add agenda checkpoints every 8-10 minutes and explicit prompts to increase interaction.";
+        } else if (speakingPct > 75) {
+            p2Body = "Very high talking density detected. Introduce short pauses to improve comprehension and reduce fatigue.";
+        } else {
+            p2Body = "Participation density is in a healthy range. Preserve this cadence for similar meeting types.";
+        }
+
+        String p3Title = "Priority 3 — Speaking Rhythm";
+        String p3Body;
+        double avgSegSec = stats.getSegments().isEmpty()
+                ? 0 : stats.getSegments().stream().mapToLong(SpeakingSegment::getDurationMs).average().orElse(0) / 1000.0;
+        if (avgSegSec < 0.7) {
+            p3Body = "Segment rhythm is fragmented. Reduce background noise and avoid interruptive overlaps to improve continuity.";
+        } else if (avgSegSec > 8.0) {
+            p3Body = "Long speaking bursts detected. Consider periodic handoffs to keep collaboration balanced.";
+        } else {
+            p3Body = "Speaking rhythm is balanced. Continue with the same facilitation pattern.";
+        }
+
+        PdfPTable t = new PdfPTable(3);
+        t.setWidthPercentage(100);
+        t.setWidths(new float[]{1f, 1f, 1f});
+        t.setSpacingAfter(8);
+        t.addCell(actionCard(p1Title, p1Body, C_ACCENT, C_ACCENT_LT));
+        t.addCell(actionCard(p2Title, p2Body, C_TEAL, C_TEAL_LT));
+        t.addCell(actionCard(p3Title, p3Body, C_AMBER, C_AMBER_LT));
+        doc.add(t);
     }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -719,6 +906,112 @@ public class PdfReportGenerator {
         return chart;
     }
 
+    private JFreeChart chartPhaseEnergy(List<Double> timeline, double threshold) {
+        DefaultCategoryDataset ds = new DefaultCategoryDataset();
+        double[] phases = phaseAverages(timeline);
+        String[] labels = {"Opening", "Middle", "Closing"};
+
+        for (int i = 0; i < phases.length; i++) {
+            ds.addValue(phases[i], "Avg RMS", labels[i]);
+            ds.addValue(threshold, "Threshold", labels[i]);
+        }
+
+        JFreeChart chart = ChartFactory.createBarChart(
+                null, null, "RMS", ds,
+                PlotOrientation.VERTICAL, true, false, false
+        );
+        chart.setBackgroundPaint(AWT_BG);
+        chart.setBorderVisible(false);
+
+        CategoryPlot plot = chart.getCategoryPlot();
+        plot.setBackgroundPaint(AWT_BG);
+        plot.setRangeGridlinePaint(AWT_GRID);
+        plot.setOutlineVisible(false);
+
+        BarRenderer br = (BarRenderer) plot.getRenderer();
+        br.setSeriesPaint(0, new java.awt.Color(59, 130, 246, 190));
+        br.setSeriesPaint(1, new java.awt.Color(245, 158, 11, 150));
+        br.setShadowVisible(false);
+        br.setMaximumBarWidth(0.18);
+
+        NumberAxis y = (NumberAxis) plot.getRangeAxis();
+        y.setLabelFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 9));
+        y.setTickLabelFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 8));
+        y.setTickLabelPaint(new java.awt.Color(100, 116, 139));
+        y.setAxisLinePaint(AWT_BORDER);
+        y.setTickMarkPaint(AWT_BORDER);
+
+        CategoryAxis x = plot.getDomainAxis();
+        x.setTickLabelFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 9));
+        x.setTickLabelPaint(AWT_INK);
+        x.setAxisLinePaint(AWT_BORDER);
+
+        chart.getLegend().setBackgroundPaint(AWT_BG);
+        chart.getLegend().setItemFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 9));
+        chart.getLegend().setItemPaint(AWT_INK);
+        chart.getLegend().setFrame(new org.jfree.chart.block.BlockBorder(AWT_BG));
+        return chart;
+    }
+
+    private JFreeChart chartMomentum(List<Double> timeline, double threshold) {
+        XYSeries raw = new XYSeries("Raw");
+        XYSeries roll = new XYSeries("Rolling Avg");
+        int w = 6;
+        double sum = 0;
+
+        for (int i = 0; i < timeline.size(); i++) {
+            double v = timeline.get(i);
+            raw.add(i, v);
+            sum += v;
+            if (i >= w) sum -= timeline.get(i - w);
+            double avg = sum / Math.min(i + 1, w);
+            roll.add(i, avg);
+        }
+
+        XYSeriesCollection ds = new XYSeriesCollection();
+        ds.addSeries(raw);
+        ds.addSeries(roll);
+
+        JFreeChart chart = ChartFactory.createXYLineChart(
+                null, "Time (s)", "RMS", ds,
+                PlotOrientation.VERTICAL, true, false, false
+        );
+        chart.setBackgroundPaint(AWT_BG);
+        chart.setBorderVisible(false);
+        chart.setPadding(new org.jfree.chart.ui.RectangleInsets(6, 6, 6, 6));
+
+        XYPlot plot = chart.getXYPlot();
+        plot.setBackgroundPaint(AWT_BG);
+        plot.setDomainGridlinePaint(AWT_GRID);
+        plot.setRangeGridlinePaint(AWT_GRID);
+        plot.setOutlineVisible(false);
+
+        XYLineAndShapeRenderer r = new XYLineAndShapeRenderer(true, false);
+        r.setSeriesPaint(0, new java.awt.Color(148, 163, 184, 160));
+        r.setSeriesStroke(0, new BasicStroke(1.1f));
+        r.setSeriesPaint(1, AWT_TEAL);
+        r.setSeriesStroke(1, new BasicStroke(2.2f));
+        plot.setRenderer(r);
+
+        org.jfree.chart.plot.ValueMarker marker = new org.jfree.chart.plot.ValueMarker(threshold);
+        marker.setPaint(AWT_AMBER);
+        marker.setStroke(new BasicStroke(1.3f, BasicStroke.CAP_ROUND,
+                BasicStroke.JOIN_ROUND, 1f, new float[]{6f, 4f}, 0f));
+        marker.setLabel("threshold");
+        marker.setLabelFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 8));
+        marker.setLabelPaint(AWT_AMBER);
+        plot.addRangeMarker(marker);
+
+        styleAxis(plot.getDomainAxis(), "Time (seconds)");
+        styleAxis(plot.getRangeAxis(), "RMS");
+
+        chart.getLegend().setBackgroundPaint(AWT_BG);
+        chart.getLegend().setItemFont(new java.awt.Font("SansSerif", java.awt.Font.PLAIN, 8));
+        chart.getLegend().setItemPaint(AWT_INK);
+        chart.getLegend().setFrame(new org.jfree.chart.block.BlockBorder(AWT_BG));
+        return chart;
+    }
+
     // ══════════════════════════════════════════════════════════════════════
     // HELPERS
     // ══════════════════════════════════════════════════════════════════════
@@ -777,6 +1070,75 @@ public class PdfReportGenerator {
         c.setHorizontalAlignment(Element.ALIGN_CENTER);
         c.setPaddingTop(4);
         return c;
+    }
+
+    private PdfPCell statPill(String value, String label, BaseColor tone, BaseColor bg) {
+        Paragraph p1 = new Paragraph(value, new Font(Font.FontFamily.HELVETICA, 18, Font.BOLD, tone));
+        p1.setAlignment(Element.ALIGN_CENTER);
+        Paragraph p2 = new Paragraph(label.toUpperCase(), new Font(Font.FontFamily.HELVETICA, 8, Font.BOLD, tone));
+        p2.setAlignment(Element.ALIGN_CENTER);
+        PdfPCell c = new PdfPCell();
+        c.setBackgroundColor(bg);
+        c.setBorder(Rectangle.NO_BORDER);
+        c.setPadding(10);
+        c.setPaddingTop(12);
+        c.setBorderWidthTop(3);
+        c.setBorderColorTop(tone);
+        c.addElement(p1);
+        c.addElement(p2);
+        return c;
+    }
+
+    private PdfPCell momentCell(String title, String detail, BaseColor tone) {
+        Paragraph p = new Paragraph();
+        p.add(new Chunk(title + "\n", new Font(Font.FontFamily.HELVETICA, 10, Font.BOLD, tone)));
+        p.add(new Chunk(detail, new Font(Font.FontFamily.HELVETICA, 9, Font.NORMAL, C_INK2)));
+        PdfPCell c = new PdfPCell(p);
+        c.setBackgroundColor(C_WHITE);
+        c.setBorder(Rectangle.LEFT);
+        c.setBorderWidthLeft(3);
+        c.setBorderColorLeft(tone);
+        c.setBorderColor(C_BORDER);
+        c.setPadding(10);
+        c.setPaddingLeft(12);
+        c.setPaddingBottom(11);
+        return c;
+    }
+
+    private PdfPCell actionCard(String title, String body, BaseColor tone, BaseColor bg) {
+        Paragraph p = new Paragraph();
+        p.add(new Chunk(title + "\n", new Font(Font.FontFamily.HELVETICA, 9, Font.BOLD, tone)));
+        p.add(new Chunk(body, new Font(Font.FontFamily.HELVETICA, 8, Font.NORMAL, C_INK2)));
+        p.setLeading(13f);
+
+        PdfPCell c = new PdfPCell(p);
+        c.setBackgroundColor(bg);
+        c.setBorder(Rectangle.LEFT);
+        c.setBorderWidthLeft(3f);
+        c.setBorderColorLeft(tone);
+        c.setPadding(10);
+        c.setPaddingTop(11);
+        c.setBorderColor(C_BORDER);
+        return c;
+    }
+
+    private double[] phaseAverages(List<Double> timeline) {
+        if (timeline == null || timeline.isEmpty()) return new double[]{0, 0, 0};
+        int n = timeline.size();
+        int a = Math.max(1, n / 3);
+        int b = Math.max(a + 1, (2 * n) / 3);
+        return new double[]{
+                avgSlice(timeline, 0, a),
+                avgSlice(timeline, a, b),
+                avgSlice(timeline, b, n)
+        };
+    }
+
+    private double avgSlice(List<Double> list, int from, int to) {
+        if (from >= to) return 0;
+        double s = 0;
+        for (int i = from; i < to; i++) s += list.get(i);
+        return s / (to - from);
     }
 
     private Paragraph emptyNotice(String msg) {

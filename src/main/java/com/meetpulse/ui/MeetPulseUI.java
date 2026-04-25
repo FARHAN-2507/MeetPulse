@@ -54,6 +54,7 @@ public class MeetPulseUI {
     private volatile double     liveRms    = 0;
     private volatile Phase      livePhase  = Phase.IDLE;
     private volatile boolean    liveSilent = true;
+    private volatile int        uiFrameTick = 0;
 
     // ── audio ─────────────────────────────────────────────────────────────
     private AudioCaptureService audioService = new AudioCaptureService();
@@ -86,6 +87,10 @@ public class MeetPulseUI {
     private Label         mPeak;
     private Label         mThreshold;
     private Label         mDuration;
+    private Label         mRaw;
+    private Label         mSmooth;
+    private Label         mFloor;
+    private Label         detectorMode;
 
     private TextArea      logArea;
     private VBox          root;
@@ -151,7 +156,7 @@ public class MeetPulseUI {
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
         // version badge
-        Label ver = new Label("v1.0");
+        Label ver = new Label("v1.2");
         ver.setStyle(
                 "-fx-font-family: 'JetBrains Mono', monospace;" +
                         "-fx-font-size: 10px;" +
@@ -185,6 +190,16 @@ public class MeetPulseUI {
                         "-fx-text-fill: " + S_MUTED + ";"
         );
 
+        detectorMode = new Label("Adaptive RMS");
+        detectorMode.setStyle(
+                "-fx-font-family: 'JetBrains Mono', monospace;" +
+                        "-fx-font-size: 10px;" +
+                        "-fx-text-fill: " + S_ACCENT + ";" +
+                        "-fx-background-color: rgba(79,142,247,0.15);" +
+                        "-fx-background-radius: 10;" +
+                        "-fx-padding: 3 8 3 8;"
+        );
+
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
@@ -215,7 +230,7 @@ public class MeetPulseUI {
         );
 
         HBox bar = new HBox(12,
-                phaseDot, statusLabel, spacer, calOverlay, timerLabel
+                phaseDot, statusLabel, detectorMode, spacer, calOverlay, timerLabel
         );
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(14, 20, 14, 20));
@@ -248,8 +263,10 @@ public class MeetPulseUI {
         // update rmsReadout from animation loop
         AnimationTimer rmsUpdater = new AnimationTimer() {
             @Override public void handle(long now) {
-                if (liveRms > 0)
+                if (liveRms > 0) {
                     rmsReadout.setText(String.format("RMS: %.0f", liveRms));
+                    threshLbl.setText(String.format("floor %.0f / thr %.0f", audioService.getNoiseFloor(), audioService.getThreshold()));
+                }
             }
         };
         rmsUpdater.start();
@@ -301,7 +318,10 @@ public class MeetPulseUI {
         gc.strokeLine(0, H * 0.5,  W, H * 0.5);
         gc.strokeLine(0, H * 0.75, W, H * 0.75);
 
-        Double[] vals = waveBuffer.toArray(new Double[0]);
+        Double[] vals;
+        synchronized (waveBuffer) {
+            vals = waveBuffer.toArray(new Double[0]);
+        }
         if (vals.length == 0) return;
 
         double maxVal = 1.0;
@@ -435,6 +455,9 @@ public class MeetPulseUI {
         mPeak      = metricVal("—");
         mThreshold = metricVal("—");
         mDuration  = metricVal("00:00");
+        mRaw       = metricVal("—");
+        mSmooth    = metricVal("—");
+        mFloor     = metricVal("—");
 
         GridPane grid = new GridPane();
         grid.setHgap(12);
@@ -451,6 +474,9 @@ public class MeetPulseUI {
         grid.add(metricCard(mSpeaking,  "SPEAKING",     S_TEAL),   0, 1);
         grid.add(metricCard(mSegments,  "SEGMENTS",     S_TEAL),   1, 1);
         grid.add(metricCard(mPeak,      "PEAK RMS",     S_RED),    2, 1);
+        grid.add(metricCard(mRaw,       "RAW RMS",      S_ACCENT), 0, 2);
+        grid.add(metricCard(mSmooth,    "SMOOTH RMS",   S_TEAL),   1, 2);
+        grid.add(metricCard(mFloor,     "NOISE FLOOR",  S_AMBER),  2, 2);
 
         return grid;
     }
@@ -549,12 +575,14 @@ public class MeetPulseUI {
 
         elapsedSec.set(0);
         timerLabel.setText("00:00");
+        uiFrameTick = 0;
 
         // wire callbacks BEFORE starting thread
         audioService.setOnFrame((rms, silent, phase) -> {
             liveRms    = rms;
             liveSilent = silent;
             livePhase  = phase;
+            uiFrameTick++;
 
             // push to waveform buffer (thread-safe deque)
             synchronized (waveBuffer) {
@@ -562,8 +590,8 @@ public class MeetPulseUI {
                 if (waveBuffer.size() > WAVE_SIZE) waveBuffer.pollFirst();
             }
 
-            // update metrics on FX thread every ~15 frames
-            if (audioService.getLiveFrameCount() % 15 == 0) {
+            // update metrics on FX thread every ~6 frames (independent of analyzer state)
+            if (uiFrameTick % 6 == 0) {
                 Platform.runLater(this::refreshMetrics);
             }
         });
@@ -620,6 +648,7 @@ public class MeetPulseUI {
         liveRms    = 0;
         liveSilent = true;
         livePhase  = Phase.IDLE;
+        uiFrameTick = 0;
 
         // clear waveform
         synchronized (waveBuffer) {
@@ -639,6 +668,9 @@ public class MeetPulseUI {
         mPeak.setText("—");
         mThreshold.setText("—");
         mDuration.setText("00:00");
+        mRaw.setText("—");
+        mSmooth.setText("—");
+        mFloor.setText("—");
 
         btnStart.setDisable(false);
         btnStop.setDisable(true);
@@ -694,14 +726,14 @@ public class MeetPulseUI {
                 phaseDot.setFill(C_AMBER);
                 setDotGlow(C_AMBER);
                 startDotPulse(C_AMBER);
-                setStatus("Calibrating mic — stay silent...", S_AMBER);
+                setStatus("Calibrating noise floor — stay silent...", S_AMBER);
                 calOverlay.setVisible(true);
             }
             case RECORDING -> {
                 phaseDot.setFill(C_TEAL);
                 setDotGlow(C_TEAL);
                 startDotPulse(C_TEAL);
-                setStatus("Recording — speak freely!", S_TEAL);
+                setStatus("Recording — adaptive threshold active", S_TEAL);
                 calOverlay.setVisible(false);
                 mThreshold.setText(String.format("%.0f", audioService.getThreshold()));
             }
@@ -750,6 +782,12 @@ public class MeetPulseUI {
         mSpeaking.setText(String.format("%.1f%%", audioService.getLiveSpeakingPct()));
         mSegments.setText(String.valueOf(audioService.getLiveSegmentCount()));
         mPeak.setText(String.format("%.0f", audioService.getLivePeakRms()));
+        mRaw.setText(String.format("%.0f", audioService.getLiveRawRms()));
+        mSmooth.setText(String.format("%.0f", audioService.getLiveSmoothedRms()));
+        mFloor.setText(String.format("%.0f", audioService.getNoiseFloor()));
+        mThreshold.setText(String.format("%.0f (Δ%.0f)",
+                audioService.getThreshold(),
+                Math.max(0.0, audioService.getThreshold() - audioService.getNoiseFloor())));
         int s = elapsedSec.get();
         mDuration.setText(String.format("%02d:%02d", s / 60, s % 60));
     }

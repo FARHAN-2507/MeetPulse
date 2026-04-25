@@ -1,0 +1,17 @@
+{
+  "src/main/java/com/meetpulse/MainApp.java": 1775111398.8548677,
+  "src/main/java/com/meetpulse/audio/AudioCaptureService.java": 1775111347.9058678,
+  "src/main/java/com/meetpulse/processing/EnergyCalculator.java": 1774883131.848853,
+  "src/main/java/com/meetpulse/processing/SilenceDetector.java": 1774881466.3028595,
+  "src/main/java/com/meetpulse/model/EnergyFrame.java": 1774881474.0548594,
+  "src/main/java/com/meetpulse/model/MeetingStats.java": 1775034312.286867,
+  "src/main/java/com/meetpulse/model/SpeakingSegment.java": 1775111386.0888677,
+  "src/main/java/com/meetpulse/service/MeetingAnalyzer.java": 1775111365.9748678,
+  "src/main/java/com/meetpulse/service/ReportExporter.java": 1775034296.6838667,
+  "src/main/java/com/meetpulse/ui/MeetPulseUI.java": 1775112082.8728652,
+  "src/main/java/com/meetpulse/report/PdfReportGenerator.java": 1775153481.3099713,
+  "README.md": 1776363225.9246738,
+  "CLAUDE.md": 1777144399.524685,
+  "AGENTS.md": 1777145444.1690102,
+  "meetpulse_report.pdf": 1776511220.3215415
+}
