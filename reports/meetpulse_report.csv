@@ -1,0 +1,22 @@
+Metric,Value,Unit
+Duration,200.309,seconds
+Total Frames,3049,frames
+Speaking Ratio,0.4322728763529026,%
+Segment Count,49,segments
+Peak RMS,1414.1879603214375,RMS
+Estimated Speakers,2,count
+Total Turns,12,turns
+Noise Floor,33.51924183682012,RMS
+Threshold,153.51924183682013,RMS
+Average ZCR,0.04345703125,rate
+Average VAD,0.0,%
+Avg Turn Duration,1069.1666666666667,ms
+Turns Per Minute,56.11847233047545,tpm
+Voice Level Variance,18216.372229149274,RMS^2
+Average Voice Level,427.6224915683479,RMS
+qualityScore,95.9,score
+speakingScore,25.9,score
+engagementScore,25.0,score
+balanceScore,20.0,score
+activityScore,25.0,score
+estimatedWpm,479,score

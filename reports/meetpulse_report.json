@@ -1,0 +1,26 @@
+{
+  "exportTime" : "2026-05-14 21:52:45",
+  "duration" : 188430,
+  "totalFrames" : 3049,
+  "speakingRatio" : 0.4322728763529026,
+  "segmentCount" : 49,
+  "peakRms" : 1414.1879603214375,
+  "estimatedSpeakers" : 2,
+  "totalTurns" : 12,
+  "noiseFloor" : 33.51924183682012,
+  "threshold" : 153.51924183682013,
+  "liveZcr" : 0.04345703125,
+  "liveVad" : 0.0,
+  "avgTurnDuration" : 1069.1666666666667,
+  "turnsPerMinute" : 56.11847233047545,
+  "voiceLevelVariance" : 18216.372229149274,
+  "avgVoiceLevel" : 427.6224915683479,
+  "qualityMetrics" : {
+    "qualityScore" : 95.9,
+    "speakingScore" : 25.9,
+    "engagementScore" : 25.0,
+    "balanceScore" : 20.0,
+    "activityScore" : 25.0,
+    "estimatedWpm" : 479
+  }
+}

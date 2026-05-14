@@ -3,6 +3,8 @@ package com.meetpulse.audio;
 import com.meetpulse.model.EnergyFrame;
 import com.meetpulse.processing.EnergyCalculator;
 import com.meetpulse.processing.SilenceDetector;
+import com.meetpulse.processing.SpeakerTurnDetector;
+import com.meetpulse.processing.VoiceActivityDetector;
 import com.meetpulse.service.MeetingAnalyzer;
 
 import javax.sound.sampled.*;
@@ -13,7 +15,6 @@ import java.util.function.Consumer;
 
 public class AudioCaptureService {
 
-    // ── audio config ──────────────────────────────────────────────────────
     private static final float SAMPLE_RATE = 44100f;
     private static final int SAMPLE_BITS = 16;
     private static final int CHANNELS = 1;
@@ -22,7 +23,6 @@ public class AudioCaptureService {
     private static final double EMA_ALPHA = 0.24;
     private static final double NOISE_TRACK_ALPHA = 0.015;
 
-    // ── state ─────────────────────────────────────────────────────────────
     public enum Phase { IDLE, CALIBRATING, RECORDING, STOPPED }
 
     private volatile Phase phase = Phase.IDLE;
@@ -32,19 +32,20 @@ public class AudioCaptureService {
     private double noiseFloor = 0.0;
     private double liveRawRms = 0.0;
     private double liveSmoothedRms = 0.0;
+    private double liveZcr = 0.0;
+    private double liveSpeechLikelihood = 0.0;
+    private double speechMultiplier = 1.6;
+    private double[] liveBandEnergies = new double[]{0.0, 0.0, 0.0, 0.0};
 
-    // ── components ────────────────────────────────────────────────────────
     private TargetDataLine line;
     private final EnergyCalculator calc = new EnergyCalculator();
     private SilenceDetector detector = new SilenceDetector(threshold);
+    private VoiceActivityDetector voiceDetector = new VoiceActivityDetector();
+    private SpeakerTurnDetector speakerDetector = new SpeakerTurnDetector();
     private final MeetingAnalyzer analyzer = new MeetingAnalyzer();
 
-    // ── callbacks (all called from the audio thread) ─────────────────────
-    /** Called every frame: (rms, isSilent, phase) */
     private TriConsumer<Double, Boolean, Phase> onFrame;
-    /** Called for log messages */
     private Consumer<String> onLog;
-    /** Called when phase changes */
     private Consumer<Phase> onPhaseChange;
 
     @FunctionalInterface
@@ -54,10 +55,17 @@ public class AudioCaptureService {
     public void setOnLog(Consumer<String> cb) { this.onLog = cb; }
     public void setOnPhaseChange(Consumer<Phase> cb) { this.onPhaseChange = cb; }
 
-    // ── main entry ────────────────────────────────────────────────────────
+    public void setSpeechMultiplier(double multiplier) {
+        this.speechMultiplier = multiplier;
+    }
+
+    public double getSpeechMultiplier() { return speechMultiplier; }
+
     public void start() {
         stopFlag = false;
         analyzer.reset();
+        voiceDetector.reset();
+        speakerDetector.reset();
 
         try {
             AudioFormat format = new AudioFormat(SAMPLE_RATE, SAMPLE_BITS, CHANNELS, true, true);
@@ -85,7 +93,6 @@ public class AudioCaptureService {
         }
     }
 
-    // ── calibration ───────────────────────────────────────────────────────
     private void runCalibration() {
         setPhase(Phase.CALIBRATING);
         log("Calibrating — please stay silent for ~3s...");
@@ -99,12 +106,15 @@ public class AudioCaptureService {
             int read = line.read(buf, 0, buf.length);
             if (read <= 0) continue;
 
-            double raw = calc.calculateRms(buf, read);
-            if (ema == 0.0) ema = raw;
-            ema = (EMA_ALPHA * raw) + ((1.0 - EMA_ALPHA) * ema);
+            EnergyCalculator.VoiceMetrics metrics = calc.calculateAll(buf, read);
+            if (ema == 0.0) ema = metrics.rms;
+            ema = (EMA_ALPHA * metrics.rms) + ((1.0 - EMA_ALPHA) * ema);
 
-            liveRawRms = raw;
+            liveRawRms = metrics.rms;
             liveSmoothedRms = ema;
+            liveZcr = metrics.zcr;
+            liveBandEnergies = metrics.bandEnergies;
+
             samples.add(ema);
 
             if (onFrame != null) onFrame.accept(ema, true, Phase.CALIBRATING);
@@ -116,42 +126,49 @@ public class AudioCaptureService {
             double med = median(samples);
             noiseFloor = Math.max(40.0, p20 > 0 ? p20 : med);
             threshold = computeAdaptiveThreshold(noiseFloor, p75);
+
             detector = new SilenceDetector(threshold, threshold * 0.82);
             detector.reset(true);
+            voiceDetector = new VoiceActivityDetector(threshold);
+            voiceDetector.calibrate(noiseFloor);
+            voiceDetector.reset();
 
-            log(String.format("Calibration done — floor %.0f, p75 %.0f, threshold %.0f",
-                    noiseFloor, p75, threshold));
+            log(String.format("Calibration done — floor %.0f, threshold %.0f", noiseFloor, threshold));
         } else {
-            // Fallback if calibration yielded nothing.
             noiseFloor = 300.0;
             threshold = 800.0;
             detector = new SilenceDetector(threshold, threshold * 0.82);
             detector.reset(true);
-            log("WARN: Calibration data unavailable, using default threshold.");
+            voiceDetector = new VoiceActivityDetector(threshold);
+            log("WARN: Calibration data unavailable, using defaults.");
         }
     }
 
-    // ── recording ─────────────────────────────────────────────────────────
     private void runRecording() {
         setPhase(Phase.RECORDING);
-        log("Recording started — signal analysis active.");
+        log("Recording started — speech detection active.");
 
         byte[] buf = new byte[BUFFER_BYTES];
         String lastState = "";
         double ema = liveSmoothedRms > 0 ? liveSmoothedRms : 0.0;
+        int frameCount = 0;
 
         while (!stopFlag) {
             int read = line.read(buf, 0, buf.length);
             if (read <= 0) continue;
 
-            double raw = calc.calculateRms(buf, read);
-            if (ema == 0.0) ema = raw;
-            ema = (EMA_ALPHA * raw) + ((1.0 - EMA_ALPHA) * ema);
+            EnergyCalculator.VoiceMetrics metrics = calc.calculateAll(buf, read);
+            if (ema == 0.0) ema = metrics.rms;
+            ema = (EMA_ALPHA * metrics.rms) + ((1.0 - EMA_ALPHA) * ema);
 
-            liveRawRms = raw;
+            liveRawRms = metrics.rms;
             liveSmoothedRms = ema;
+            liveZcr = metrics.zcr;
+            liveBandEnergies = metrics.bandEnergies;
 
-            // Slowly track noise floor only when likely silent to avoid chasing speech.
+            VoiceActivityDetector.DetectionResult vadResult = voiceDetector.detect(metrics);
+            boolean isSpeaking = vadResult.isSpeaking;
+
             if (ema < threshold * 0.9) {
                 if (noiseFloor <= 0) noiseFloor = ema;
                 noiseFloor = ((1.0 - NOISE_TRACK_ALPHA) * noiseFloor) + (NOISE_TRACK_ALPHA * ema);
@@ -159,53 +176,72 @@ public class AudioCaptureService {
                 detector.setThresholds(threshold, threshold * 0.82);
             }
 
-            boolean silent = detector.isSilent(ema);
+            boolean silent = detector.isSilent(ema) && !isSpeaking;
             analyzer.addFrame(new EnergyFrame(System.currentTimeMillis(), ema, silent));
+
+            speakerDetector.processFrame(ema, metrics.zcr, System.currentTimeMillis());
 
             if (onFrame != null) onFrame.accept(ema, silent, Phase.RECORDING);
 
+            liveSpeechLikelihood = vadResult.confidence;
+
+            frameCount++;
             String state = silent ? "SILENT" : "SPEAKING";
-            if (!state.equals(lastState)) {
-                log(String.format("%s  raw: %.0f  smooth: %.0f  thr: %.0f",
-                        silent ? "🔇 Silence" : "🎤 Speaking", raw, ema, threshold));
+            if (!state.equals(lastState) && frameCount % 10 == 0) {
+                SpeakerTurnDetector.SpeakerAnalysis analysis = speakerDetector.getAnalysis();
+                log(String.format("%s  RMS: %.0f  ZCR: %.3f  VAD: %.0f%%  Speakers: ~%d",
+                        silent ? "Silence" : "Speaking",
+                        ema, metrics.zcr,
+                        vadResult.confidence * 100,
+                        analysis.estimatedSpeakers));
                 lastState = state;
             }
         }
+
+        SpeakerTurnDetector.SpeakerAnalysis finalAnalysis = speakerDetector.getAnalysis();
+        log(String.format("Session complete — Detected ~%d speaker(s), %d turns",
+                finalAnalysis.estimatedSpeakers, finalAnalysis.totalTurns));
     }
 
-    // ── stop/reset ────────────────────────────────────────────────────────
-    public void stop() {
-        stopFlag = true;
-    }
+    public void stop() { stopFlag = true; }
 
     public void reset() {
         stopFlag = true;
         closeHardware();
         analyzer.reset();
+        voiceDetector.reset();
+        speakerDetector.reset();
         threshold = 800.0;
         noiseFloor = 0.0;
         liveRawRms = 0.0;
         liveSmoothedRms = 0.0;
+        liveZcr = 0.0;
+        liveSpeechLikelihood = 0.0;
+        liveBandEnergies = new double[]{0.0, 0.0, 0.0, 0.0};
         detector = new SilenceDetector(threshold, threshold * 0.82);
         detector.reset(true);
         setPhase(Phase.IDLE);
     }
 
-    // ── accessors ─────────────────────────────────────────────────────────
     public Phase getPhase() { return phase; }
     public double getThreshold() { return threshold; }
     public double getNoiseFloor() { return noiseFloor; }
     public double getLiveRawRms() { return liveRawRms; }
     public double getLiveSmoothedRms() { return liveSmoothedRms; }
+    public double getLiveZcr() { return liveZcr; }
+    public double getLiveSpeechLikelihood() { return liveSpeechLikelihood; }
+    public double[] getLiveBandEnergies() { return liveBandEnergies; }
     public MeetingAnalyzer getAnalyzer() { return analyzer; }
+    public SpeakerTurnDetector getSpeakerDetector() { return speakerDetector; }
+    public VoiceActivityDetector getVoiceDetector() { return voiceDetector; }
 
-    /** Safe live snapshot — never mutates segment state */
     public double getLiveSpeakingPct() { return analyzer.getLiveSpeakingPct(); }
     public int getLiveSegmentCount() { return analyzer.getLiveSegmentCount(); }
     public double getLivePeakRms() { return analyzer.getLivePeakRms(); }
     public int getLiveFrameCount() { return analyzer.getLiveFrameCount(); }
+    public int getEstimatedSpeakers() { return speakerDetector.getAnalysis().estimatedSpeakers; }
+    public int getSpeakerTurnCount() { return speakerDetector.getTurnCount(); }
 
-    // ── helpers ───────────────────────────────────────────────────────────
     private void closeHardware() {
         if (line != null && line.isOpen()) {
             line.stop();
@@ -234,25 +270,18 @@ public class AudioCaptureService {
         return sorted.get(lo) * (1.0 - w) + sorted.get(hi) * w;
     }
 
-    private double medianAbsoluteDeviation(List<Double> values, double med) {
-        List<Double> dev = new ArrayList<>(values.size());
-        for (double v : values) dev.add(Math.abs(v - med));
-        return median(dev);
-    }
-
-    private double clamp(double v, double lo, double hi) {
-        if (v < lo) return lo;
-        if (v > hi) return hi;
-        return v;
-    }
-
     private double computeAdaptiveThreshold(double floor, double anchor) {
-        // Keep threshold above floor but avoid exploding under transient spikes.
         double base = floor + 120.0;
         double ratio = floor * 2.25;
         double guided = Math.max(base, ratio);
         if (anchor > 0) guided = Math.max(guided, anchor * 0.92);
         return clamp(guided, 120.0, 12000.0);
+    }
+
+    private double clamp(double v, double lo, double hi) {
+        if (v < lo) return lo;
+        if (v > hi) return v;
+        return v;
     }
 
     private void setPhase(Phase p) {

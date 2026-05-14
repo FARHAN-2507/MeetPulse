@@ -2,7 +2,12 @@ package com.meetpulse.ui;
 
 import com.meetpulse.audio.AudioCaptureService;
 import com.meetpulse.audio.AudioCaptureService.Phase;
+import com.meetpulse.model.MeetingSession;
+import com.meetpulse.processing.VoiceActivityDetector;
 import com.meetpulse.report.PdfReportGenerator;
+import com.meetpulse.service.ExportService;
+import com.meetpulse.service.PreferencesManager;
+import com.meetpulse.service.SessionHistoryManager;
 
 import javafx.animation.*;
 import javafx.application.Platform;
@@ -10,6 +15,7 @@ import javafx.geometry.*;
 import javafx.scene.canvas.*;
 import javafx.scene.control.*;
 import javafx.scene.effect.DropShadow;
+import javafx.scene.input.KeyCode;
 import javafx.scene.layout.*;
 import javafx.scene.paint.*;
 import javafx.scene.shape.*;
@@ -20,89 +26,75 @@ import javafx.util.Duration;
 import java.io.File;
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class MeetPulseUI {
 
-    // ── palette ───────────────────────────────────────────────────────────
-    private static final Color C_BG       = Color.web("#0b0e17");
-    private static final Color C_SURFACE  = Color.web("#131929");
-    private static final Color C_SURFACE2 = Color.web("#1a2035");
-    private static final Color C_BORDER   = Color.web("#1f2d47");
-    private static final Color C_ACCENT   = Color.web("#4f8ef7");
-    private static final Color C_TEAL     = Color.web("#1dd6a0");
-    private static final Color C_AMBER    = Color.web("#f5a623");
-    private static final Color C_RED      = Color.web("#f05c5c");
-    private static final Color C_TEXT     = Color.web("#e2e8f8");
-    private static final Color C_MUTED    = Color.web("#5a6a8a");
-    private static final Color C_MUTED2   = Color.web("#3a4a6a");
+    private ThemeManager.ThemeColors T;
+    private final PreferencesManager prefs;
+    private final SessionHistoryManager history;
+    private final ExportService exportService;
 
-    private static final String S_BG       = "#0b0e17";
-    private static final String S_SURFACE  = "#131929";
-    private static final String S_SURFACE2 = "#1a2035";
-    private static final String S_BORDER   = "#1f2d47";
-    private static final String S_ACCENT   = "#4f8ef7";
-    private static final String S_TEAL     = "#1dd6a0";
-    private static final String S_AMBER    = "#f5a623";
-    private static final String S_RED      = "#f05c5c";
-    private static final String S_TEXT     = "#e2e8f8";
-    private static final String S_MUTED    = "#5a6a8a";
-
-    // ── waveform buffer ───────────────────────────────────────────────────
-    private static final int    WAVE_SIZE  = 140;
+    private static final int WAVE_SIZE = 140;
     private final Deque<Double> waveBuffer = new ArrayDeque<>();
-    private volatile double     liveRms    = 0;
-    private volatile Phase      livePhase  = Phase.IDLE;
-    private volatile boolean    liveSilent = true;
-    private volatile int        uiFrameTick = 0;
+    private volatile double liveRms = 0;
+    private volatile double liveZcr = 0;
+    private volatile Phase livePhase = Phase.IDLE;
+    private volatile boolean liveSilent = true;
+    private volatile int uiFrameTick = 0;
 
-    // ── audio ─────────────────────────────────────────────────────────────
     private AudioCaptureService audioService = new AudioCaptureService();
-    private Thread              audioThread;
+    private Thread audioThread;
 
-    // ── timer ─────────────────────────────────────────────────────────────
     private final AtomicInteger elapsedSec = new AtomicInteger(0);
-    private Timeline            timerTimeline;
-    private Timeline            calCountdown;
-    private int                 calSecsLeft = 3;
+    private Timeline timerTimeline;
+    private Timeline calCountdown;
+    private int calSecsLeft = 3;
 
-    // ── ui nodes ──────────────────────────────────────────────────────────
-    private Canvas        waveCanvas;
+    private Canvas waveCanvas;
     private AnimationTimer waveAnim;
 
-    private Circle        phaseDot;
-    private Label         statusLabel;
-    private Label         timerLabel;
-    private Label         calCountLabel;
-    private StackPane     calOverlay;
+    private Circle phaseDot;
+    private Label statusLabel;
+    private Label timerLabel;
+    private Label calCountLabel;
+    private StackPane calOverlay;
+    private Label qualityScoreLabel;
 
-    private Button        btnStart;
-    private Button        btnStop;
-    private Button        btnReset;
-    private Button        btnReport;
+    private Button btnStart, btnStop, btnReset, btnReport, btnSettings, btnHistory;
 
-    private Label         mFrames;
-    private Label         mSpeaking;
-    private Label         mSegments;
-    private Label         mPeak;
-    private Label         mThreshold;
-    private Label         mDuration;
-    private Label         mRaw;
-    private Label         mSmooth;
-    private Label         mFloor;
-    private Label         detectorMode;
+    private Label mFrames, mSpeaking, mPeak, mThreshold, mDuration;
+    private Label mZcr, mVad, mSpeakers, mTurns, mQuality, mWpm;
 
-    private TextArea      logArea;
-    private VBox          root;
+    private Label dRms, dFloor, dThr, dZcr, dVad, dSpeaker;
+    private ProgressBar energyBar;
 
-    // ─────────────────────────────────────────────────────────────────────
+    private TextArea logArea;
+    private Slider sensitivitySlider;
+    private Label sensitivityLabel;
+    private ToggleButton themeToggle;
+    private VBox root;
+
+    public MeetPulseUI() {
+        this.prefs = new PreferencesManager();
+        this.history = new SessionHistoryManager();
+        this.exportService = new ExportService();
+        T = ThemeManager.LIGHT;
+        ThemeManager.setTheme(prefs.getTheme());
+        applyTheme();
+    }
+
+    private void applyTheme() {
+        T = ThemeManager.getColors();
+    }
+
     public VBox buildRoot() {
-        // seed waveform buffer
         for (int i = 0; i < WAVE_SIZE; i++) waveBuffer.addLast(0.0);
 
         root = new VBox(16);
-        root.setStyle("-fx-background-color: " + S_BG + ";");
-        root.setPadding(new Insets(24, 28, 24, 28));
+        root.setStyle("-fx-background-color: " + T.bg + "; -fx-padding: 20;");
+        root.setFocusTraversable(true);
 
         root.getChildren().addAll(
                 buildHeader(),
@@ -110,94 +102,97 @@ public class MeetPulseUI {
                 buildWaveformSection(),
                 buildControlBar(),
                 buildMetricsGrid(),
+                buildDebugPanel(),
                 buildLogSection()
         );
 
+        setupKeyboardShortcuts();
         startWaveAnimation();
         return root;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // HEADER
-    // ══════════════════════════════════════════════════════════════════════
     private HBox buildHeader() {
-        // icon box
         StackPane iconBox = new StackPane();
-        iconBox.setPrefSize(42, 42);
+        iconBox.setPrefSize(44, 44);
         iconBox.setStyle(
-                "-fx-background-color: linear-gradient(to bottom right, #4f8ef7, #1dd6a0);" +
-                        "-fx-background-radius: 12;"
+                "-fx-background-color: " + T.accent + ";" +
+                "-fx-background-radius: 12;" +
+                "-fx-effect: dropshadow(gaussian, " + T.shadow + ", 4, 0, 0, 2);"
         );
         Label iconLbl = new Label("M");
         iconLbl.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 18px; -fx-font-weight: bold;" +
-                        "-fx-text-fill: #0b0e17;"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 18px; -fx-font-weight: bold; -fx-text-fill: white;"
         );
         iconBox.getChildren().add(iconLbl);
 
         Label title = new Label("MeetPulse");
         title.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 20px; -fx-font-weight: bold;" +
-                        "-fx-text-fill: " + S_TEXT + ";"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 22px; -fx-font-weight: 700; -fx-text-fill: " + T.text + ";"
         );
         Label subtitle = new Label("Audio Intelligence");
         subtitle.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 10px;" +
-                        "-fx-text-fill: " + S_MUTED + ";" +
-                        "-fx-letter-spacing: 1.5;"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 11px; -fx-font-weight: 500; -fx-text-fill: " + T.textMuted + ";"
         );
         VBox titleVBox = new VBox(2, title, subtitle);
-        titleVBox.setAlignment(Pos.CENTER_LEFT);
 
         Region spacer = new Region();
         HBox.setHgrow(spacer, Priority.ALWAYS);
 
-        // version badge
-        Label ver = new Label("v1.2");
-        ver.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 10px;" +
-                        "-fx-text-fill: " + S_MUTED + ";" +
-                        "-fx-background-color: " + S_SURFACE2 + ";" +
-                        "-fx-background-radius: 20;" +
-                        "-fx-border-color: " + S_BORDER + ";" +
+        themeToggle = new ToggleButton();
+        themeToggle.setStyle(
+                "-fx-background-color: " + T.surface2 + ";" +
+                        "-fx-border-color: " + T.border + ";" +
                         "-fx-border-radius: 20;" +
-                        "-fx-padding: 4 12 4 12;"
+                        "-fx-background-radius: 20;" +
+                        "-fx-padding: 6 12 6 12;" +
+                        "-fx-cursor: hand;" +
+                        "-fx-text-fill: " + T.text + ";"
+        );
+        themeToggle.setText(ThemeManager.getCurrentTheme() == ThemeManager.Theme.LIGHT ? "Dark Mode" : "Light Mode");
+        themeToggle.setOnAction(e -> {
+            ThemeManager.toggleTheme();
+            applyTheme();
+            prefs.setTheme(ThemeManager.getCurrentTheme());
+            prefs.savePreferences();
+            refreshTheme();
+        });
+
+        qualityScoreLabel = new Label("—");
+        qualityScoreLabel.setStyle(
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 14px; -fx-font-weight: 700;" +
+                        "-fx-text-fill: " + T.accent + ";"
         );
 
-        HBox header = new HBox(12, iconBox, titleVBox, spacer, ver);
+        HBox header = new HBox(12, iconBox, titleVBox, spacer, qualityScoreLabel, themeToggle);
         header.setAlignment(Pos.CENTER_LEFT);
         return header;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STATUS BAR
-    // ══════════════════════════════════════════════════════════════════════
-    private HBox buildStatusBar() {
-        phaseDot = new Circle(7, C_MUTED);
+    private void refreshTheme() {
+        root.setStyle("-fx-background-color: " + T.bg + "; -fx-padding: 20;");
+        themeToggle.setText(ThemeManager.getCurrentTheme() == ThemeManager.Theme.LIGHT ? "Dark Mode" : "Light Mode");
+        themeToggle.setTextFill(Color.web(T.text));
+    }
 
-        // glow effect on dot
-        DropShadow glow = new DropShadow(12, C_MUTED);
+    private HBox buildStatusBar() {
+        phaseDot = new Circle(7, Color.web(T.textMuted));
+        DropShadow glow = new DropShadow(12, Color.web(T.textMuted));
         phaseDot.setEffect(glow);
 
         statusLabel = new Label("Ready — press Start to begin");
-        statusLabel.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 12px;" +
-                        "-fx-text-fill: " + S_MUTED + ";"
-        );
+        statusLabel.setStyle(mono(13, T.textMuted, true));
 
-        detectorMode = new Label("Adaptive RMS");
+        Label detectorMode = new Label("Adaptive RMS");
         detectorMode.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 10px;" +
-                        "-fx-text-fill: " + S_ACCENT + ";" +
-                        "-fx-background-color: rgba(79,142,247,0.15);" +
-                        "-fx-background-radius: 10;" +
-                        "-fx-padding: 3 8 3 8;"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 11px; -fx-font-weight: 600;" +
+                        "-fx-text-fill: " + T.accent + ";" +
+                        "-fx-background-color: " + T.surface2 + ";" +
+                        "-fx-background-radius: 10; -fx-padding: 3 10 3 10;"
         );
 
         Region spacer = new Region();
@@ -205,51 +200,42 @@ public class MeetPulseUI {
 
         timerLabel = new Label("00:00");
         timerLabel.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 26px; -fx-font-weight: bold;" +
-                        "-fx-text-fill: " + S_ACCENT + ";"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 28px; -fx-font-weight: 700; -fx-text-fill: " + T.text + ";"
         );
 
-        // calibration countdown overlay
         calCountLabel = new Label("3");
         calCountLabel.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 11px; -fx-font-weight: bold;" +
-                        "-fx-text-fill: " + S_AMBER + ";"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 11px; -fx-font-weight: 700; -fx-text-fill: " + T.amber + ";"
         );
         calOverlay = new StackPane(calCountLabel);
         calOverlay.setPrefWidth(30);
         calOverlay.setAlignment(Pos.CENTER);
         calOverlay.setVisible(false);
         calOverlay.setStyle(
-                "-fx-background-color: rgba(245,166,35,0.15);" +
+                "-fx-background-color: " + T.surface2 + ";" +
                         "-fx-background-radius: 6;" +
-                        "-fx-border-color: " + S_AMBER + ";" +
-                        "-fx-border-radius: 6;" +
-                        "-fx-padding: 2 6 2 6;"
+                        "-fx-border-color: " + T.amber + ";" +
+                        "-fx-border-radius: 6; -fx-padding: 2 6 2 6;"
         );
 
-        HBox bar = new HBox(12,
-                phaseDot, statusLabel, detectorMode, spacer, calOverlay, timerLabel
-        );
+        HBox bar = new HBox(12, phaseDot, statusLabel, detectorMode, spacer, calOverlay, timerLabel);
         bar.setAlignment(Pos.CENTER_LEFT);
         bar.setPadding(new Insets(14, 20, 14, 20));
-        bar.setStyle(card());
+        bar.setStyle(cardStyle());
         return bar;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // WAVEFORM
-    // ══════════════════════════════════════════════════════════════════════
     private VBox buildWaveformSection() {
         Label lbl = new Label("LIVE ENERGY");
-        lbl.setStyle(mono(9, S_MUTED));
+        lbl.setStyle(mono(10, T.textMuted, true));
 
         Label rmsReadout = new Label("RMS: —");
-        rmsReadout.setStyle(mono(9, S_ACCENT));
+        rmsReadout.setStyle(mono(10, T.accent, false));
 
         Label threshLbl = new Label("— threshold");
-        threshLbl.setStyle(mono(9, S_AMBER));
+        threshLbl.setStyle(mono(10, T.amber, false));
 
         Region sp = new Region();
         HBox.setHgrow(sp, Priority.ALWAYS);
@@ -257,33 +243,22 @@ public class MeetPulseUI {
         HBox labelRow = new HBox(8, lbl, sp, rmsReadout, threshLbl);
         labelRow.setAlignment(Pos.CENTER_LEFT);
 
-        waveCanvas = new Canvas(756, 90);
+        waveCanvas = new Canvas(700, 90);
         drawIdleWave();
-
-        // update rmsReadout from animation loop
-        AnimationTimer rmsUpdater = new AnimationTimer() {
-            @Override public void handle(long now) {
-                if (liveRms > 0) {
-                    rmsReadout.setText(String.format("RMS: %.0f", liveRms));
-                    threshLbl.setText(String.format("floor %.0f / thr %.0f", audioService.getNoiseFloor(), audioService.getThreshold()));
-                }
-            }
-        };
-        rmsUpdater.start();
 
         VBox box = new VBox(8, labelRow, waveCanvas);
         box.setPadding(new Insets(16, 20, 16, 20));
-        box.setStyle(card());
+        box.setStyle(cardStyle());
         return box;
     }
 
     private void drawIdleWave() {
         GraphicsContext gc = waveCanvas.getGraphicsContext2D();
         double W = waveCanvas.getWidth(), H = waveCanvas.getHeight();
-        gc.setFill(Color.TRANSPARENT);
         gc.clearRect(0, 0, W, H);
-
-        gc.setStroke(Color.web(S_BORDER));
+        gc.setFill(Color.web(T.surface2));
+        gc.fillRect(0, 0, W, H);
+        gc.setStroke(Color.web(T.border));
         gc.setLineWidth(1);
         gc.strokeLine(0, H / 2, W, H / 2);
     }
@@ -291,10 +266,8 @@ public class MeetPulseUI {
     private void startWaveAnimation() {
         waveAnim = new AnimationTimer() {
             long lastDraw = 0;
-
-            @Override
-            public void handle(long now) {
-                if (now - lastDraw < 33_000_000) return; // ~30fps
+            @Override public void handle(long now) {
+                if (now - lastDraw < 33_000_000) return;
                 lastDraw = now;
                 renderWave();
             }
@@ -307,16 +280,12 @@ public class MeetPulseUI {
         double W = waveCanvas.getWidth();
         double H = waveCanvas.getHeight();
 
-        // dark background with subtle gradient
-        gc.setFill(Color.web(S_SURFACE));
+        gc.setFill(Color.web(T.surface2));
         gc.fillRect(0, 0, W, H);
 
-        // grid lines
-        gc.setStroke(Color.web(S_BORDER, 0.5));
+        gc.setStroke(Color.web(T.border));
         gc.setLineWidth(0.5);
-        gc.strokeLine(0, H * 0.25, W, H * 0.25);
-        gc.strokeLine(0, H * 0.5,  W, H * 0.5);
-        gc.strokeLine(0, H * 0.75, W, H * 0.75);
+        gc.strokeLine(0, H * 0.5, W, H * 0.5);
 
         Double[] vals;
         synchronized (waveBuffer) {
@@ -327,137 +296,131 @@ public class MeetPulseUI {
         double maxVal = 1.0;
         for (double v : vals) if (v > maxVal) maxVal = v;
 
-        // draw threshold line
-        double thresh = audioService.getThreshold();
-        if (thresh > 0 && maxVal > 0 && livePhase == Phase.RECORDING) {
-            double ty = H - (thresh / maxVal) * (H - 8) - 4;
-            ty = Math.max(4, Math.min(H - 4, ty));
-            gc.setStroke(Color.web(S_AMBER, 0.6));
-            gc.setLineWidth(1);
-            gc.setLineDashes(6, 4);
-            gc.strokeLine(0, ty, W, ty);
-            gc.setLineDashes(0);
-        }
-
         double barW = W / vals.length;
-
         for (int i = 0; i < vals.length; i++) {
-            double norm  = vals[i] / maxVal;
-            double barH  = Math.max(norm * (H - 8), 1.5);
-            double x     = i * barW;
-            double y     = (H - barH) / 2.0;
+            double norm = vals[i] / maxVal;
+            double barH = Math.max(norm * (H - 8), 1.5);
+            double x = i * barW;
+            double y = (H - barH) / 2.0;
 
-            // colour: idle=muted, calibrating=amber, silent=blue, speaking=teal
             Color fill;
             double alpha = 0.25 + norm * 0.75;
             if (livePhase == Phase.IDLE || livePhase == Phase.STOPPED) {
-                fill = Color.web(S_MUTED, alpha * 0.5);
+                fill = Color.web(T.textMuted, alpha * 0.5);
             } else if (livePhase == Phase.CALIBRATING) {
-                fill = Color.web(S_AMBER, alpha);
+                fill = Color.web(T.amber, alpha);
             } else if (!liveSilent) {
-                fill = Color.web(S_TEAL, alpha);
+                fill = Color.web(T.teal, alpha);
             } else {
-                fill = Color.web(S_ACCENT, alpha * 0.6);
+                fill = Color.web(T.accent, alpha * 0.6);
             }
 
             gc.setFill(fill);
-
-            // rounded-ish bars: draw with slight rounding via arc
-            double bw = Math.max(barW - 2, 1);
-            gc.fillRoundRect(x + 1, y, bw, barH, 2, 2);
-
-            // top glow on loud bars
-            if (norm > 0.7 && livePhase == Phase.RECORDING && !liveSilent) {
-                gc.setFill(Color.web(S_TEAL, 0.3 * norm));
-                gc.fillRoundRect(x + 1, y, bw, barH * 0.3, 2, 2);
-            }
+            gc.fillRoundRect(x + 1, y, Math.max(barW - 2, 1), barH, 2, 2);
         }
 
-        // speaking indicator pulse overlay
         if (livePhase == Phase.RECORDING && !liveSilent) {
-            // subtle teal border glow
-            gc.setStroke(Color.web(S_TEAL, 0.3));
+            gc.setStroke(Color.web(T.teal, 0.4));
             gc.setLineWidth(2);
             gc.strokeRect(1, 1, W - 2, H - 2);
         }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // CONTROLS
-    // ══════════════════════════════════════════════════════════════════════
     private HBox buildControlBar() {
-        btnStart  = makeBtn("▶  Start",           S_TEAL,   "#021a12", true);
-        btnStop   = makeBtn("■  Stop",             S_RED,    "#1a0606", false);
-        btnReset  = makeBtn("↺  Reset",            S_AMBER,  "#1a1006", false);
-        btnReport = makeBtn("⬇  Generate Report",  S_ACCENT, "#040d1f", false);
+        sensitivityLabel = new Label("Sensitivity: " + String.format("%.1fx", prefs.getSensitivity()));
+        sensitivityLabel.setStyle(mono(11, T.textMuted, true));
 
-        btnStart.setOnAction(e  -> onStart());
-        btnStop.setOnAction(e   -> onStop());
-        btnReset.setOnAction(e  -> onReset());
+        sensitivitySlider = new Slider(1.2, 2.5, prefs.getSensitivity());
+        sensitivitySlider.setStyle(
+                "-fx-control-inner-background: " + T.surface2 + ";" +
+                        "-fx-thumb: " + T.accent + ";"
+        );
+        sensitivitySlider.setPrefWidth(150);
+        sensitivitySlider.valueProperty().addListener((obs, old, val) -> {
+            double val1 = val.doubleValue();
+            sensitivityLabel.setText("Sensitivity: " + String.format("%.1fx", val1));
+            prefs.setSensitivity(val1);
+        });
+
+        Region sp = new Region();
+        HBox.setHgrow(sp, Priority.ALWAYS);
+
+        btnStart = makeBtn("▶  Start", T.teal, true);
+        btnStop = makeBtn("■  Stop", T.red, false);
+        btnReset = makeBtn("↺  Reset", T.amber, false);
+        btnReport = makeBtn("⬇  Export", T.accent, false);
+        btnSettings = makeBtn("⚙", T.textMuted, true);
+        btnHistory = makeBtn("📋", T.textMuted, true);
+
+        btnStart.setOnAction(e -> onStart());
+        btnStop.setOnAction(e -> onStop());
+        btnReset.setOnAction(e -> onReset());
         btnReport.setOnAction(e -> onGenerateReport());
+        btnSettings.setOnAction(e -> showSettingsDialog());
+        btnHistory.setOnAction(e -> showHistoryDialog());
 
-        // equal width
-        HBox.setHgrow(btnStart,  Priority.ALWAYS);
-        HBox.setHgrow(btnStop,   Priority.ALWAYS);
-        HBox.setHgrow(btnReset,  Priority.ALWAYS);
+        HBox.setHgrow(btnStart, Priority.ALWAYS);
+        HBox.setHgrow(btnStop, Priority.ALWAYS);
+        HBox.setHgrow(btnReset, Priority.ALWAYS);
         HBox.setHgrow(btnReport, Priority.ALWAYS);
         btnStart.setMaxWidth(Double.MAX_VALUE);
         btnStop.setMaxWidth(Double.MAX_VALUE);
         btnReset.setMaxWidth(Double.MAX_VALUE);
         btnReport.setMaxWidth(Double.MAX_VALUE);
 
-        HBox bar = new HBox(12, btnStart, btnStop, btnReset, btnReport);
+        HBox controls = new HBox(8, btnStart, btnStop, btnReset, btnReport, btnSettings, btnHistory);
+
+        VBox sliderBox = new VBox(4, sensitivityLabel, sensitivitySlider);
+        sliderBox.setPadding(new Insets(0, 0, 0, 20));
+
+        HBox bar = new HBox(12, sliderBox, sp, controls);
         return bar;
     }
 
-    private Button makeBtn(String text, String bg, String fg, boolean enabled) {
+    private Button makeBtn(String text, String color, boolean enabled) {
         Button b = new Button(text);
         b.setDisable(!enabled);
-        b.setStyle(btnStyle(bg, fg));
-        b.setOnMouseEntered(e -> { if (!b.isDisabled()) b.setStyle(btnHover(bg, fg)); });
-        b.setOnMouseExited(e  -> { if (!b.isDisabled()) b.setStyle(btnStyle(bg, fg)); });
+        b.setStyle(btnStyle(color));
+        b.setOnMouseEntered(e -> { if (!b.isDisabled()) b.setStyle(btnHover(color)); });
+        b.setOnMouseExited(e -> { if (!b.isDisabled()) b.setStyle(btnStyle(color)); });
         b.disabledProperty().addListener((obs, old, disabled) -> {
-            b.setStyle(disabled ? btnDisabled() : btnStyle(bg, fg));
+            b.setStyle(disabled ? btnDisabled() : btnStyle(color));
         });
         return b;
     }
 
-    private String btnStyle(String bg, String fg) {
-        return "-fx-background-color: " + bg + ";" +
-                "-fx-text-fill: " + fg + ";" +
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                "-fx-font-size: 12px; -fx-font-weight: bold;" +
-                "-fx-background-radius: 10;" +
-                "-fx-padding: 13 10 13 10;" +
-                "-fx-cursor: hand;";
+    private String btnStyle(String color) {
+        return "-fx-background-color: " + color + ";" +
+                "-fx-text-fill: white;" +
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                "-fx-font-size: 13px; -fx-font-weight: 600;" +
+                "-fx-background-radius: 10; -fx-padding: 12 16 12 16;" +
+                "-fx-cursor: hand; -fx-effect: dropshadow(gaussian, " + T.shadow + ", 4, 0, 0, 2);";
     }
 
-    private String btnHover(String bg, String fg) {
-        return btnStyle(bg, fg) + "-fx-opacity: 0.85;";
+    private String btnHover(String color) {
+        return btnStyle(color) + "-fx-opacity: 0.85;";
     }
 
     private String btnDisabled() {
-        return "-fx-background-color: " + S_SURFACE2 + ";" +
-                "-fx-text-fill: " + S_MUTED + ";" +
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                "-fx-font-size: 12px;" +
-                "-fx-background-radius: 10;" +
-                "-fx-padding: 13 10 13 10;";
+        return "-fx-background-color: " + T.surface2 + ";" +
+                "-fx-text-fill: " + T.textMuted + ";" +
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                "-fx-font-size: 13px; -fx-background-radius: 10; -fx-padding: 12 16 12 16;";
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // METRICS GRID
-    // ══════════════════════════════════════════════════════════════════════
     private GridPane buildMetricsGrid() {
-        mFrames    = metricVal("—");
-        mSpeaking  = metricVal("—");
-        mSegments  = metricVal("—");
-        mPeak      = metricVal("—");
+        mDuration = metricVal("00:00");
+        mFrames = metricVal("—");
         mThreshold = metricVal("—");
-        mDuration  = metricVal("00:00");
-        mRaw       = metricVal("—");
-        mSmooth    = metricVal("—");
-        mFloor     = metricVal("—");
+        mSpeaking = metricVal("—");
+        mSpeakers = metricVal("—");
+        mTurns = metricVal("—");
+        mPeak = metricVal("—");
+        mZcr = metricVal("—");
+        mVad = metricVal("—");
+        mQuality = metricVal("—");
+        mWpm = metricVal("—");
 
         GridPane grid = new GridPane();
         grid.setHgap(12);
@@ -468,73 +431,112 @@ public class MeetPulseUI {
         cc.setPercentWidth(33.33);
         grid.getColumnConstraints().addAll(cc, cc, cc);
 
-        grid.add(metricCard(mDuration,  "DURATION",     S_ACCENT), 0, 0);
-        grid.add(metricCard(mFrames,    "FRAMES",       S_ACCENT), 1, 0);
-        grid.add(metricCard(mThreshold, "THRESHOLD",    S_AMBER),  2, 0);
-        grid.add(metricCard(mSpeaking,  "SPEAKING",     S_TEAL),   0, 1);
-        grid.add(metricCard(mSegments,  "SEGMENTS",     S_TEAL),   1, 1);
-        grid.add(metricCard(mPeak,      "PEAK RMS",     S_RED),    2, 1);
-        grid.add(metricCard(mRaw,       "RAW RMS",      S_ACCENT), 0, 2);
-        grid.add(metricCard(mSmooth,    "SMOOTH RMS",   S_TEAL),   1, 2);
-        grid.add(metricCard(mFloor,     "NOISE FLOOR",  S_AMBER),  2, 2);
+        grid.add(metricCard(mDuration, "DURATION", T.accent), 0, 0);
+        grid.add(metricCard(mFrames, "FRAMES", T.accent), 1, 0);
+        grid.add(metricCard(mThreshold, "THRESHOLD", T.amber), 2, 0);
+
+        grid.add(metricCard(mSpeaking, "SPEAKING", T.teal), 0, 1);
+        grid.add(metricCard(mSpeakers, "SPEAKERS", T.teal), 1, 1);
+        grid.add(metricCard(mTurns, "TURNS", T.accent), 2, 1);
+
+        grid.add(metricCard(mPeak, "PEAK RMS", T.red), 0, 2);
+        grid.add(metricCard(mZcr, "ZCR", T.accent), 1, 2);
+        grid.add(metricCard(mVad, "VAD %", T.teal), 2, 2);
 
         return grid;
     }
 
+    private VBox buildDebugPanel() {
+        Label title = new Label("DEBUG PANEL");
+        title.setStyle(mono(10, T.textMuted, true));
+
+        HBox metricsRow = new HBox(20);
+
+        dRms = new Label("RMS: —");
+        dFloor = new Label("Floor: —");
+        dThr = new Label("Thr: —");
+        dZcr = new Label("ZCR: —");
+        dVad = new Label("VAD: —");
+        dSpeaker = new Label("Spk: —");
+
+        Label[] debugLabels = {dRms, dFloor, dThr, dZcr, dVad, dSpeaker};
+        for (Label lbl : debugLabels) {
+            lbl.setStyle(mono(10, T.textMuted, false));
+        }
+
+        energyBar = new ProgressBar(0);
+        energyBar.setPrefWidth(200);
+        energyBar.setStyle(
+                "-fx-control-inner-background: " + T.surface2 + ";" +
+                        "-fx-accent: " + T.accent + ";"
+        );
+
+        HBox energyRow = new HBox(8, new Label("Energy:"), energyBar);
+        energyRow.setAlignment(Pos.CENTER_LEFT);
+
+        metricsRow.getChildren().addAll(debugLabels);
+        metricsRow.setAlignment(Pos.CENTER_LEFT);
+
+        VBox panel = new VBox(8, title, metricsRow, energyRow);
+        panel.setPadding(new Insets(14, 18, 14, 18));
+        panel.setStyle(cardStyle());
+
+        if (!prefs.isShowDebugPanel()) {
+            panel.setVisible(false);
+        }
+
+        return panel;
+    }
+
     private VBox metricCard(Label val, String label, String color) {
         val.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 22px; -fx-font-weight: bold;" +
-                        "-fx-text-fill: " + color + ";"
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 24px; -fx-font-weight: 700; -fx-text-fill: " + color + ";"
         );
         Label lbl = new Label(label);
-        lbl.setStyle(mono(8, S_MUTED));
+        lbl.setStyle(mono(10, T.textMuted, true));
 
-        // bottom accent bar
         Region accentBar = new Region();
-        accentBar.setPrefHeight(2);
-        accentBar.setStyle("-fx-background-color: " + color + "; -fx-background-radius: 1;");
+        accentBar.setPrefHeight(3);
+        accentBar.setStyle("-fx-background-color: " + color + "; -fx-background-radius: 2;");
         accentBar.setMaxWidth(Double.MAX_VALUE);
 
-        VBox card = new VBox(4, val, lbl, accentBar);
-        card.setPadding(new Insets(14, 16, 12, 16));
-        card.setStyle(card());
+        VBox card = new VBox(6, val, lbl, accentBar);
+        card.setPadding(new Insets(16, 18, 12, 18));
+        card.setStyle(cardStyle() + "-fx-effect: dropshadow(gaussian, " + T.shadow + ", 4, 0, 0, 2);");
         card.setMaxWidth(Double.MAX_VALUE);
         return card;
     }
 
     private Label metricVal(String text) {
         Label l = new Label(text);
+        l.setStyle(
+                "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 14px; -fx-text-fill: " + T.text + ";"
+        );
         return l;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // LOG
-    // ══════════════════════════════════════════════════════════════════════
     private VBox buildLogSection() {
         HBox header = new HBox(8);
         header.setAlignment(Pos.CENTER_LEFT);
 
-        Circle dot = new Circle(4, C_TEAL);
-        // animate pulse
+        Circle dot = new Circle(4, Color.web(T.teal));
         FadeTransition ft = new FadeTransition(Duration.seconds(1.2), dot);
         ft.setFromValue(1); ft.setToValue(0.3);
         ft.setAutoReverse(true); ft.setCycleCount(Animation.INDEFINITE);
         ft.play();
 
         Label lbl = new Label("CONSOLE OUTPUT");
-        lbl.setStyle(mono(9, S_MUTED));
+        lbl.setStyle(mono(10, T.textMuted, true));
 
         Button clearBtn = new Button("Clear");
         clearBtn.setStyle(
-                "-fx-background-color: transparent;" +
-                        "-fx-text-fill: " + S_MUTED + ";" +
-                        "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 9px;" +
-                        "-fx-border-color: " + S_BORDER + ";" +
-                        "-fx-border-radius: 4;" +
-                        "-fx-padding: 2 8 2 8;" +
-                        "-fx-cursor: hand;"
+                "-fx-background-color: transparent; -fx-text-fill: " + T.textMuted + ";" +
+                        "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 11px; -fx-font-weight: 500;" +
+                        "-fx-border-color: " + T.border + "; -fx-border-radius: 6;" +
+                        "-fx-padding: 4 12 4 12; -fx-cursor: hand;"
         );
         clearBtn.setOnAction(e -> logArea.clear());
 
@@ -544,29 +546,37 @@ public class MeetPulseUI {
 
         logArea = new TextArea("[ MeetPulse ready ]\n");
         logArea.setEditable(false);
-        logArea.setPrefHeight(130);
+        logArea.setPrefHeight(100);
         logArea.setWrapText(true);
         logArea.setStyle(
-                "-fx-background-color: #080c14;" +
-                        "-fx-control-inner-background: #080c14;" +
-                        "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 11px;" +
-                        "-fx-text-fill: #4a7a6a;" +
-                        "-fx-border-color: transparent;" +
-                        "-fx-highlight-fill: #1f3a5a;" +
-                        "-fx-focus-color: transparent;" +
-                        "-fx-faint-focus-color: transparent;"
+                "-fx-background-color: " + T.surface2 + ";" +
+                        "-fx-control-inner-background: " + T.surface2 + ";" +
+                        "-fx-font-family: 'Segoe UI', sans-serif;" +
+                        "-fx-font-size: 12px; -fx-text-fill: " + T.text + ";" +
+                        "-fx-border-color: " + T.border + ";" +
+                        "-fx-border-radius: 10; -fx-background-radius: 10;"
         );
 
         VBox box = new VBox(10, header, logArea);
         box.setPadding(new Insets(14, 18, 14, 18));
-        box.setStyle(card());
+        box.setStyle(cardStyle());
         return box;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SESSION ACTIONS
-    // ══════════════════════════════════════════════════════════════════════
+    private void setupKeyboardShortcuts() {
+        root.setOnKeyPressed(e -> {
+            KeyCode code = e.getCode();
+
+            if (code == KeyCode.SPACE) {
+                if (!btnStart.isDisabled()) onStart();
+            } else if (code == KeyCode.R && !e.isControlDown()) {
+                if (!btnReset.isDisabled()) onReset();
+            } else if (code == KeyCode.ESCAPE) {
+                System.exit(0);
+            }
+        });
+    }
+
     private void onStart() {
         btnStart.setDisable(true);
         btnStop.setDisable(false);
@@ -577,20 +587,20 @@ public class MeetPulseUI {
         timerLabel.setText("00:00");
         uiFrameTick = 0;
 
-        // wire callbacks BEFORE starting thread
+        audioService = new AudioCaptureService();
+        audioService.setSpeechMultiplier(prefs.getSensitivity());
+
         audioService.setOnFrame((rms, silent, phase) -> {
-            liveRms    = rms;
+            liveRms = rms;
             liveSilent = silent;
-            livePhase  = phase;
+            livePhase = phase;
             uiFrameTick++;
 
-            // push to waveform buffer (thread-safe deque)
             synchronized (waveBuffer) {
                 waveBuffer.addLast(rms);
                 if (waveBuffer.size() > WAVE_SIZE) waveBuffer.pollFirst();
             }
 
-            // update metrics on FX thread every ~6 frames (independent of analyzer state)
             if (uiFrameTick % 6 == 0) {
                 Platform.runLater(this::refreshMetrics);
             }
@@ -603,13 +613,20 @@ public class MeetPulseUI {
             updatePhaseUI(phase);
         }));
 
-        audioThread = new Thread(audioService::start, "meetpulse-audio");
+        audioThread = new Thread(() -> {
+            try {
+                audioService.start();
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    appendLog("ERROR: " + e.getMessage());
+                    onReset();
+                });
+            }
+        }, "meetpulse-audio");
         audioThread.setDaemon(true);
         audioThread.start();
 
         startTimerTick();
-        startCalCountdown();
-
         appendLog("=== Session started ===");
     }
 
@@ -622,9 +639,8 @@ public class MeetPulseUI {
         btnStop.setDisable(true);
         btnReset.setDisable(false);
         btnReport.setDisable(false);
-        btnStart.setDisable(true); // use Reset to start again
+        btnStart.setDisable(true);
 
-        // Wait briefly for audio thread to finish then refresh
         new Thread(() -> {
             try { Thread.sleep(600); } catch (InterruptedException ignored) {}
             Platform.runLater(() -> {
@@ -638,39 +654,39 @@ public class MeetPulseUI {
     }
 
     private void onReset() {
-        // stop if still running
         audioService.stop();
         stopTimerTick();
         stopCalCountdown();
 
-        // create fresh service
         audioService = new AudioCaptureService();
-        liveRms    = 0;
+        liveRms = 0;
+        liveZcr = 0;
         liveSilent = true;
-        livePhase  = Phase.IDLE;
+        livePhase = Phase.IDLE;
         uiFrameTick = 0;
 
-        // clear waveform
         synchronized (waveBuffer) {
             waveBuffer.clear();
             for (int i = 0; i < WAVE_SIZE; i++) waveBuffer.addLast(0.0);
         }
 
-        // reset UI
         elapsedSec.set(0);
         timerLabel.setText("00:00");
         calOverlay.setVisible(false);
         updatePhaseUI(Phase.IDLE);
 
-        mFrames.setText("—");
-        mSpeaking.setText("—");
-        mSegments.setText("—");
-        mPeak.setText("—");
-        mThreshold.setText("—");
         mDuration.setText("00:00");
-        mRaw.setText("—");
-        mSmooth.setText("—");
-        mFloor.setText("—");
+        mFrames.setText("—");
+        mThreshold.setText("—");
+        mSpeaking.setText("—");
+        mSpeakers.setText("—");
+        mTurns.setText("—");
+        mPeak.setText("—");
+        mZcr.setText("—");
+        mVad.setText("—");
+        mQuality.setText("—");
+        mWpm.setText("—");
+        qualityScoreLabel.setText("—");
 
         btnStart.setDisable(false);
         btnStop.setDisable(true);
@@ -681,67 +697,191 @@ public class MeetPulseUI {
     }
 
     private void onGenerateReport() {
-        FileChooser fc = new FileChooser();
-        fc.setTitle("Save PDF Report");
-        fc.setInitialFileName("meetpulse_report.pdf");
-        fc.getExtensionFilters().add(
-                new FileChooser.ExtensionFilter("PDF Files", "*.pdf")
-        );
-        File file = fc.showSaveDialog(root.getScene().getWindow());
-        if (file == null) return;
+        ChoiceDialog<String> dialog = new ChoiceDialog<>("PDF", "PDF", "JSON", "CSV");
+        dialog.setTitle("Export Format");
+        dialog.setHeaderText("Select export format");
+        dialog.setContentText("Format:");
 
-        btnReport.setDisable(true);
-        btnReport.setText("Generating...");
+        dialog.showAndWait().ifPresent(format -> {
+            String ext = format.toLowerCase();
+            FileChooser fc = new FileChooser();
+            fc.setTitle("Export Report");
+            fc.setInitialFileName("meetpulse_report." + ext);
+            fc.getExtensionFilters().add(new FileChooser.ExtensionFilter(format.toUpperCase() + " Files", "*." + ext));
 
-        new Thread(() -> {
-            try {
-                new PdfReportGenerator().generate(audioService, file.getAbsolutePath());
-                Platform.runLater(() -> {
-                    appendLog("PDF saved → " + file.getName());
-                    btnReport.setText("⬇  Generate Report");
-                    btnReport.setDisable(false);
-                });
-            } catch (Exception ex) {
-                Platform.runLater(() -> {
-                    appendLog("PDF error: " + ex.getMessage());
-                    btnReport.setText("⬇  Generate Report");
-                    btnReport.setDisable(false);
-                });
-            }
-        }).start();
+            File file = fc.showSaveDialog(root.getScene().getWindow());
+            if (file == null) return;
+
+            btnReport.setDisable(true);
+            btnReport.setText("Exporting...");
+
+            new Thread(() -> {
+                try {
+                    ExportService.ExportFormat exportFormat = ExportService.ExportFormat.valueOf(format.toUpperCase());
+                    exportService.exportSession(audioService, file.getAbsolutePath(), exportFormat);
+
+                    if (prefs.isAutoSaveSession()) {
+                        saveCurrentSession();
+                    }
+
+                    Platform.runLater(() -> {
+                        appendLog("Export saved → " + file.getName());
+                        btnReport.setText("⬇  Export");
+                        btnReport.setDisable(false);
+                    });
+                } catch (Exception ex) {
+                    Platform.runLater(() -> {
+                        appendLog("Export error: " + ex.getMessage());
+                        btnReport.setText("⬇  Export");
+                        btnReport.setDisable(false);
+                    });
+                }
+            }).start();
+        });
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // UI STATE UPDATES
-    // ══════════════════════════════════════════════════════════════════════
+    private void saveCurrentSession() {
+        MeetingSession session = new MeetingSession();
+        session.setDurationMs(elapsedSec.get() * 1000L);
+        session.setSpeakingRatio(audioService.getAnalyzer().getLiveSpeakingPct() / 100.0);
+        session.setSpeakerCount(audioService.getEstimatedSpeakers());
+        session.setTotalTurns(audioService.getSpeakerTurnCount());
+        session.setPeakRms(audioService.getAnalyzer().getLivePeakRms());
+        session.setAvgNoiseFloor(audioService.getNoiseFloor());
+        session.setAvgThreshold(audioService.getThreshold());
+        session.setQualityScore(exportService.calculateQualityScore(audioService));
+        session.setEstimatedWpm(exportService.calculateWpm(audioService));
+        history.saveSession(session);
+    }
+
+    private void showSettingsDialog() {
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Settings");
+        dialog.setHeaderText("MeetPulse Settings");
+
+        VBox content = new VBox(15);
+        content.setPadding(new Insets(20));
+
+        CheckBox autoSaveCheck = new CheckBox("Auto-save sessions");
+        autoSaveCheck.setSelected(prefs.isAutoSaveSession());
+        autoSaveCheck.setOnAction(e -> {
+            prefs.setAutoSaveSession(autoSaveCheck.isSelected());
+            prefs.savePreferences();
+        });
+
+        CheckBox debugCheck = new CheckBox("Show debug panel");
+        debugCheck.setSelected(prefs.isShowDebugPanel());
+        debugCheck.setOnAction(e -> {
+            prefs.setShowDebugPanel(debugCheck.isSelected());
+            prefs.savePreferences();
+        });
+
+        Label resetLabel = new Label("Reset to Defaults:");
+        Button resetBtn = new Button("Reset Settings");
+        resetBtn.setOnAction(e -> {
+            prefs.resetToDefaults();
+            prefs.savePreferences();
+            autoSaveCheck.setSelected(prefs.isAutoSaveSession());
+            debugCheck.setSelected(prefs.isShowDebugPanel());
+            sensitivitySlider.setValue(prefs.getSensitivity());
+            sensitivityLabel.setText("Sensitivity: " + String.format("%.1fx", prefs.getSensitivity()));
+            appendLog("Settings reset to defaults");
+        });
+
+        Label infoLabel = new Label("Sessions stored at:\n" + history.getHistoryPath());
+
+        content.getChildren().addAll(autoSaveCheck, debugCheck, new Separator(), resetLabel, resetBtn, new Separator(), infoLabel);
+
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        DialogPane dialogPane = dialog.getDialogPane();
+        dialogPane.setStyle(
+                "-fx-background-color: " + T.surface + ";" +
+                "-fx-border-color: " + T.border + ";" +
+                "-fx-border-radius: 12;" +
+                "-fx-background-radius: 12;"
+        );
+
+        dialog.showAndWait();
+    }
+
+    private void showHistoryDialog() {
+        Dialog<Void> dialog = new Dialog<>();
+        dialog.setTitle("Session History");
+        dialog.setHeaderText("Past Meeting Sessions");
+
+        VBox content = new VBox(15);
+        content.setPadding(new Insets(20));
+
+        List<MeetingSession> sessions = history.getRecentSessions(20);
+
+        if (sessions.isEmpty()) {
+            content.getChildren().add(new Label("No sessions saved yet.\nStart recording to save sessions."));
+        } else {
+            for (MeetingSession s : sessions) {
+                HBox sessionRow = new HBox(20);
+                sessionRow.getChildren().addAll(
+                        new Label(s.getId()),
+                        new Label(s.getFormattedDate()),
+                        new Label(String.format("Score: %.0f", s.getQualityScore())),
+                        new Label(String.format("Speaking: %.0f%%", s.getSpeakingRatio() * 100))
+                );
+                content.getChildren().add(sessionRow);
+            }
+
+            Button clearBtn = new Button("Clear History");
+            clearBtn.setOnAction(e -> {
+                history.clearHistory();
+                appendLog("Session history cleared");
+                dialog.close();
+                showHistoryDialog();
+            });
+            content.getChildren().add(new Separator());
+            content.getChildren().add(clearBtn);
+        }
+
+        dialog.getDialogPane().setContent(content);
+        dialog.getDialogPane().getButtonTypes().add(ButtonType.CLOSE);
+
+        DialogPane dialogPane = dialog.getDialogPane();
+        dialogPane.setStyle(
+                "-fx-background-color: " + T.surface + ";" +
+                "-fx-border-color: " + T.border + ";" +
+                "-fx-border-radius: 12;" +
+                "-fx-background-radius: 12;"
+        );
+
+        dialog.showAndWait();
+    }
+
     private void updatePhaseUI(Phase phase) {
         switch (phase) {
             case IDLE -> {
-                phaseDot.setFill(C_MUTED);
-                setDotGlow(C_MUTED);
+                phaseDot.setFill(Color.web(T.textMuted));
+                setDotGlow(Color.web(T.textMuted));
                 stopDotPulse();
-                setStatus("Ready — press Start to begin", S_MUTED);
+                setStatus("Ready — press Start to begin", T.textMuted);
             }
             case CALIBRATING -> {
-                phaseDot.setFill(C_AMBER);
-                setDotGlow(C_AMBER);
-                startDotPulse(C_AMBER);
-                setStatus("Calibrating noise floor — stay silent...", S_AMBER);
+                phaseDot.setFill(Color.web(T.amber));
+                setDotGlow(Color.web(T.amber));
+                startDotPulse(Color.web(T.amber));
+                setStatus("Calibrating — stay silent...", T.amber);
                 calOverlay.setVisible(true);
             }
             case RECORDING -> {
-                phaseDot.setFill(C_TEAL);
-                setDotGlow(C_TEAL);
-                startDotPulse(C_TEAL);
-                setStatus("Recording — adaptive threshold active", S_TEAL);
+                phaseDot.setFill(Color.web(T.teal));
+                setDotGlow(Color.web(T.teal));
+                startDotPulse(Color.web(T.teal));
+                setStatus("Recording — adaptive threshold active", T.teal);
                 calOverlay.setVisible(false);
-                mThreshold.setText(String.format("%.0f", audioService.getThreshold()));
             }
             case STOPPED -> {
-                phaseDot.setFill(C_RED);
-                setDotGlow(C_RED);
+                phaseDot.setFill(Color.web(T.red));
+                setDotGlow(Color.web(T.red));
                 stopDotPulse();
-                setStatus("Stopped — generate report or reset", S_MUTED);
+                setStatus("Stopped — export or reset", T.textMuted);
             }
         }
     }
@@ -769,38 +909,49 @@ public class MeetPulseUI {
 
     private void setStatus(String msg, String color) {
         statusLabel.setText(msg);
-        statusLabel.setStyle(
-                "-fx-font-family: 'JetBrains Mono', monospace;" +
-                        "-fx-font-size: 12px;" +
-                        "-fx-text-fill: " + color + ";"
-        );
+        statusLabel.setStyle(mono(13, color, true));
     }
 
     private void refreshMetrics() {
         if (livePhase == Phase.IDLE) return;
+
         mFrames.setText(String.valueOf(audioService.getLiveFrameCount()));
-        mSpeaking.setText(String.format("%.1f%%", audioService.getLiveSpeakingPct()));
-        mSegments.setText(String.valueOf(audioService.getLiveSegmentCount()));
-        mPeak.setText(String.format("%.0f", audioService.getLivePeakRms()));
-        mRaw.setText(String.format("%.0f", audioService.getLiveRawRms()));
-        mSmooth.setText(String.format("%.0f", audioService.getLiveSmoothedRms()));
-        mFloor.setText(String.format("%.0f", audioService.getNoiseFloor()));
-        mThreshold.setText(String.format("%.0f (Δ%.0f)",
-                audioService.getThreshold(),
-                Math.max(0.0, audioService.getThreshold() - audioService.getNoiseFloor())));
+        mSpeaking.setText(String.format("%.1f%%", audioService.getAnalyzer().getLiveSpeakingPct()));
+        mPeak.setText(String.format("%.0f", audioService.getAnalyzer().getLivePeakRms()));
+        mZcr.setText(String.format("%.3f", audioService.getLiveZcr()));
+        mVad.setText(String.format("%.0f%%", audioService.getLiveSpeechLikelihood() * 100));
+        mSpeakers.setText(String.valueOf(audioService.getEstimatedSpeakers()));
+        mTurns.setText(String.valueOf(audioService.getSpeakerTurnCount()));
+        mThreshold.setText(String.format("%.0f", audioService.getThreshold()));
+
         int s = elapsedSec.get();
         mDuration.setText(String.format("%02d:%02d", s / 60, s % 60));
+
+        double quality = exportService.calculateQualityScore(audioService);
+        mQuality.setText(String.format("%.0f", quality));
+        qualityScoreLabel.setText(String.format("Q: %.0f", quality));
+
+        double wpm = exportService.calculateWpm(audioService);
+        mWpm.setText(String.format("%.0f", wpm));
+
+        dRms.setText(String.format("RMS: %.0f", liveRms));
+        dFloor.setText(String.format("Floor: %.0f", audioService.getNoiseFloor()));
+        dThr.setText(String.format("Thr: %.0f", audioService.getThreshold()));
+        dZcr.setText(String.format("ZCR: %.3f", audioService.getLiveZcr()));
+        dVad.setText(String.format("VAD: %.0f%%", audioService.getLiveSpeechLikelihood() * 100));
+        dSpeaker.setText(String.format("Spk: %d", audioService.getEstimatedSpeakers()));
+
+        double maxRms = audioService.getAnalyzer().getLivePeakRms();
+        double energyLevel = maxRms > 0 ? Math.min(liveRms / maxRms, 1.0) : 0;
+        energyBar.setProgress(energyLevel);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // TIMER
-    // ══════════════════════════════════════════════════════════════════════
     private void startTimerTick() {
         stopTimerTick();
         timerTimeline = new Timeline(new KeyFrame(Duration.seconds(1), e -> {
             int s = elapsedSec.incrementAndGet();
             timerLabel.setText(String.format("%02d:%02d", s / 60, s % 60));
-            mDuration.setText(String.format("%02d:%02d",  s / 60, s % 60));
+            mDuration.setText(String.format("%02d:%02d", s / 60, s % 60));
         }));
         timerTimeline.setCycleCount(Animation.INDEFINITE);
         timerTimeline.play();
@@ -810,49 +961,24 @@ public class MeetPulseUI {
         if (timerTimeline != null) { timerTimeline.stop(); timerTimeline = null; }
     }
 
-    private void startCalCountdown() {
-        calSecsLeft = 3;
-        calCountLabel.setText("3s");
-        calOverlay.setVisible(false); // shown by phase change
-        stopCalCountdown();
-        calCountdown = new Timeline(new KeyFrame(Duration.seconds(1), e -> {
-            calSecsLeft--;
-            if (calSecsLeft > 0) {
-                calCountLabel.setText(calSecsLeft + "s");
-            } else {
-                calOverlay.setVisible(false);
-                stopCalCountdown();
-            }
-        }));
-        calCountdown.setCycleCount(3);
-        calCountdown.play();
-    }
-
     private void stopCalCountdown() {
         if (calCountdown != null) { calCountdown.stop(); calCountdown = null; }
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // LOG
-    // ══════════════════════════════════════════════════════════════════════
     private void appendLog(String msg) {
         logArea.appendText(msg + "\n");
         logArea.setScrollTop(Double.MAX_VALUE);
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STYLE HELPERS
-    // ══════════════════════════════════════════════════════════════════════
-    private String card() {
-        return "-fx-background-color: " + S_SURFACE + ";" +
-                "-fx-border-color: " + S_BORDER + ";" +
-                "-fx-border-radius: 12;" +
-                "-fx-background-radius: 12;";
+    private String cardStyle() {
+        return "-fx-background-color: " + T.surface + ";" +
+                "-fx-border-color: " + T.border + ";" +
+                "-fx-border-radius: 12; -fx-background-radius: 12;";
     }
 
-    private String mono(int size, String color) {
-        return "-fx-font-family: 'JetBrains Mono', monospace;" +
-                "-fx-font-size: " + size + "px;" +
-                "-fx-text-fill: " + color + ";";
+    private String mono(int size, String color, boolean weight500) {
+        String weight = weight500 ? "500" : "400";
+        return "-fx-font-family: 'Segoe UI', sans-serif;" +
+                "-fx-font-size: " + size + "px; -fx-font-weight: " + weight + "; -fx-text-fill: " + color + ";";
     }
 }
